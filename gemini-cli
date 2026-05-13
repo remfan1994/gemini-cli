@@ -3,84 +3,66 @@
 # ==========================================================
 # gemini-cli
 # ----------------------------------------------------------
-# Terminal-based chat interface for Google Gemini API
+# Terminal-based Gemini AI interface
 #
-# DESIGN GOAL:
-#   Provide a lightweight, dependency-minimal CLI chat tool
-#   with persistent sessions, readable logs, and configurable
-#   behavior via environment + config file.
+# FEATURES
+#   - Persistent chat sessions
+#   - Named/resumable conversations
+#   - Timestamped logs
+#   - Lightweight rolling memory
+#   - Config file support
+#   - Attachment extraction system
 #
-# IMPORTANT ARCHITECTURAL PRINCIPLE:
-#   This tool intentionally avoids heavy dependencies
-#   (e.g. node, python frameworks, ncurses) to remain usable
-#   in constrained environments such as ChromeOS containers.
+# ATTACHMENT SYSTEM
+#   Code blocks returned by Gemini are automatically:
+#     - extracted from terminal output
+#     - saved into ~/.gpt/attachments/
+#     - replaced with attachment notices
+#
+# DESIGN GOALS
+#   - minimal dependencies
+#   - shell-friendly
+#   - readable logs
+#   - artifact-oriented workflow
 # ==========================================================
 
 
 # ==========================================================
-# CONFIGURATION DIRECTORIES
-# ----------------------------------------------------------
-# ~/.gpt/           -> session logs (historical design name)
-# ~/.config/...     -> modern configuration system
-#
-# We maintain both because:
-#   - ~/.gpt is already used by earlier versions
-#   - ~/.config is the correct modern Unix convention
+# DIRECTORY SETUP
 # ==========================================================
 
 CONFIG_DIR="$HOME/.config/gemini-cli"
 CONFIG_FILE="$CONFIG_DIR/config"
 
-mkdir -p "$HOME/.gpt"
+SESSION_DIR="$HOME/.gpt"
+ATTACHMENT_DIR="$SESSION_DIR/attachments"
+
 mkdir -p "$CONFIG_DIR"
+mkdir -p "$SESSION_DIR"
+mkdir -p "$ATTACHMENT_DIR"
 
 
 # ==========================================================
 # DEFAULT SETTINGS
-# ----------------------------------------------------------
-# These values are used ONLY if not overridden by:
-#   1. config file
-#   2. environment variables (for API key)
 # ==========================================================
 
 MODEL="gemini-2.5-flash"
-
-# Number of recent messages to retain in memory context.
-# This is a lightweight "rolling window" used to keep
-# short-term coherence in conversations without full replay.
 HISTORY_LIMIT=12
 
 
 # ==========================================================
 # CONFIG FILE LOADING
-# ----------------------------------------------------------
-# The config file is simple key=value pairs.
-#
-# Example:
-#   MODEL=gemini-2.5-flash
-#   HISTORY_LIMIT=20
-#   GEMINI_API_KEY=abc123
-#
-# NOTE:
-#   We intentionally do NOT support complex parsing formats
-#   (JSON, TOML, etc.) to keep the tool shell-friendly.
 # ==========================================================
 
 if [ -f "$CONFIG_FILE" ]; then
   while IFS='=' read -r key value; do
     case "$key" in
-
-      # Override model selection
       MODEL)
         MODEL="$value"
         ;;
-
-      # Override memory window size
       HISTORY_LIMIT)
         HISTORY_LIMIT="$value"
         ;;
-
-      # API key can be stored here, but is overridden by env var
       GEMINI_API_KEY)
         GEMINI_API_KEY="${GEMINI_API_KEY:-$value}"
         ;;
@@ -90,110 +72,63 @@ fi
 
 
 # ==========================================================
-# ENVIRONMENT VARIABLE PRIORITY CHECK
-# ----------------------------------------------------------
-# Security principle:
-#   Environment variables take precedence over config files.
-#
-# Reason:
-#   - avoids committing secrets to disk
-#   - allows temporary session keys
-#   - supports CI/CD environments cleanly
+# API KEY VALIDATION
 # ==========================================================
 
 if [ -z "$GEMINI_API_KEY" ]; then
-  echo "ERROR: GEMINI_API_KEY not set (env or config file)"
-  echo "Set it via: export GEMINI_API_KEY=..."
+  echo "ERROR: GEMINI_API_KEY not set"
+  echo ""
+  echo "Set it either:"
+  echo "  export GEMINI_API_KEY=your_key"
+  echo ""
+  echo "or inside:"
+  echo "  ~/.config/gemini-cli/config"
   exit 1
 fi
 
 
 # ==========================================================
-# API ENDPOINT CONSTRUCTION
-# ----------------------------------------------------------
-# This builds the Gemini REST endpoint dynamically based on
-# the selected model.
-#
-# This allows switching models without modifying code.
+# API ENDPOINT
 # ==========================================================
 
 URL="https://generativelanguage.googleapis.com/v1beta/models/$MODEL:generateContent?key=$GEMINI_API_KEY"
 
 
 # ==========================================================
-# USER CONTEXT VARIABLES
-# ----------------------------------------------------------
-# USER_NAME is used only for display/logging purposes.
-# It does not affect API behavior.
+# RUNTIME VARIABLES
 # ==========================================================
 
 USER_NAME="$(whoami)"
-
 HISTORY=()
 SUMMARY=""
 
 
 # ==========================================================
-# UTILITY: TIMESTAMP FUNCTION
-# ----------------------------------------------------------
-# Standardized timestamp format used in:
-#   - logs
-#   - UI headers
-#   - debugging output
+# UTILITIES
 # ==========================================================
 
 timestamp() {
   date +"%H:%M:%S"
 }
 
-
-# ==========================================================
-# SESSION MANAGEMENT
-# ----------------------------------------------------------
-# Sessions are stored as flat files:
-#   ~/.gpt/<session>.log
-#
-# This design is intentionally simple:
-#   - easy to inspect
-#   - easy to backup
-#   - no database dependency
-# ==========================================================
-
 resolve_session_path() {
-  echo "$HOME/.gpt/$1.log"
+  echo "$SESSION_DIR/$1.log"
 }
 
 list_sessions() {
-  # Lists all saved session names (without extension)
-  ls -1 "$HOME/.gpt"/*.log 2>/dev/null | sed 's#.*/##; s/\.log$##'
+  ls -1 "$SESSION_DIR"/*.log 2>/dev/null \
+    | sed 's#.*/##; s/\.log$##'
   exit 0
 }
 
 version() {
-  echo "gemini-cli version 1.0"
+  echo "gemini-cli version 2.0"
   exit 0
 }
 
 
 # ==========================================================
-# COMMAND-LINE ARGUMENT PARSING
-# ----------------------------------------------------------
-# Supported modes:
-#
-#   gemini-cli
-#       -> new timestamp session
-#
-#   gemini-cli <name>
-#       -> named session
-#
-#   gemini-cli --resume <name>
-#       -> resume session
-#
-#   gemini-cli --list
-#       -> list sessions
-#
-#   gemini-cli --version
-#       -> show version
+# SESSION ARGUMENT PARSING
 # ==========================================================
 
 case "$1" in
@@ -208,25 +143,23 @@ case "$1" in
 
   --resume)
     SESSION="$(resolve_session_path "$2")"
+    SESSION_NAME="$2"
     ;;
 
   "")
-    # Default behavior: anonymous timestamp session
-    SESSION="$HOME/.gpt/session-$(date +%Y-%m-%d-%H-%M-%S).log"
+    SESSION_NAME="session-$(date +%Y-%m-%d-%H-%M-%S)"
+    SESSION="$SESSION_DIR/$SESSION_NAME.log"
     ;;
 
   *)
-    # Named session provided by user
+    SESSION_NAME="$1"
     SESSION="$(resolve_session_path "$1")"
     ;;
 esac
 
 
 # ==========================================================
-# STARTUP OUTPUT
-# ----------------------------------------------------------
-# Informational header shown once at startup.
-# Useful for debugging and confirming session identity.
+# STARTUP BANNER
 # ==========================================================
 
 echo "gemini-cli"
@@ -236,23 +169,12 @@ echo ""
 
 
 # ==========================================================
-# MEMORY SYSTEM (LIGHTWEIGHT)
-# ----------------------------------------------------------
-# We intentionally do NOT store full history in API calls.
-#
-# Instead:
-#   - we keep a rolling buffer (HISTORY)
-#   - older context is implicitly summarized (SUMMARY placeholder)
-#
-# This prevents:
-#   - token explosion
-#   - slow API responses
+# MEMORY MANAGEMENT
 # ==========================================================
 
 add_to_history() {
   HISTORY+=("$1")
 
-  # Trim history to maintain bounded memory usage
   if [ "${#HISTORY[@]}" -gt "$HISTORY_LIMIT" ]; then
     HISTORY=("${HISTORY[@]: -6}")
   fi
@@ -270,120 +192,211 @@ build_context() {
 
 
 # ==========================================================
-# MAIN CHAT LOOP
+# ATTACHMENT EXTRACTION
 # ----------------------------------------------------------
-# This loop:
-#   1. reads user input
-#   2. logs it
-#   3. sends it to Gemini API
-#   4. prints formatted response
-#   5. stores result in session history
+# This function:
+#   - scans Gemini output for fenced code blocks
+#   - saves them into attachment files
+#   - removes them from displayed terminal output
+#
+# Terminal output becomes cleaner while preserving
+# artifacts as reusable files.
+# ==========================================================
+
+extract_attachments() {
+
+python3 - "$ATTACHMENT_DIR" "$SESSION_NAME" <<'PYTHON'
+import os
+import re
+import sys
+
+attachment_dir = sys.argv[1]
+session_name = sys.argv[2]
+
+text = sys.stdin.read()
+
+# ==========================================================
+# LANGUAGE -> EXTENSION MAP
+# ==========================================================
+
+ext_map = {
+    "bash": ".sh",
+    "sh": ".sh",
+    "shell": ".sh",
+    "python": ".py",
+    "json": ".json",
+    "yaml": ".yml",
+    "yml": ".yml",
+    "javascript": ".js",
+    "js": ".js",
+    "html": ".html",
+    "css": ".css",
+    "sql": ".sql",
+    "text": ".txt"
+}
+
+counter = 1
+
+pattern = re.compile(
+    r"```([a-zA-Z0-9_-]*)\n(.*?)```",
+    re.DOTALL
+)
+
+def replacement(match):
+    global counter
+
+    lang = match.group(1).strip().lower()
+    content = match.group(2)
+
+    if not lang:
+        lang = "text"
+
+    ext = ext_map.get(lang, ".txt")
+
+    filename = (
+        f"{session_name}-"
+        f"{lang}-"
+        f"{counter:02d}"
+        f"{ext}"
+    )
+
+    path = os.path.join(attachment_dir, filename)
+
+    with open(path, "w") as f:
+        f.write(content)
+
+    counter += 1
+
+    return (
+        f"\n"
+        f"[attachment saved]\n"
+        f"file: {filename}\n"
+        f"location: {attachment_dir}\n"
+    )
+
+cleaned = pattern.sub(replacement, text)
+
+print(cleaned)
+PYTHON
+
+}
+
+
+# ==========================================================
+# MAIN CHAT LOOP
 # ==========================================================
 
 while true; do
 
-  # Capture current timestamp for UI + logs
   TS="$(timestamp)"
 
-  # Prompt user for input
-  # NOTE: uses simple cat-based input (no readline dependency)
   printf "[%s] %s> " "$TS" "$USER_NAME"
+
   buffer=$(cat)
 
-  # Ignore empty input
   [ -z "$buffer" ] && continue
 
 
   # ========================================================
-  # LOG USER INPUT TO SESSION FILE
-  # --------------------------------------------------------
-  # Every user message is persisted for:
-  #   - audit trail
-  #   - session replay
-  #   - debugging API behavior
+  # LOG USER INPUT
   # ========================================================
 
-  printf "[%s] %s: %s\n" "$TS" "$USER_NAME" "$buffer" >> "$SESSION"
+  printf "[%s] %s: %s\n" \
+    "$TS" \
+    "$USER_NAME" \
+    "$buffer" >> "$SESSION"
 
   add_to_history "User: $buffer"
 
 
   # ========================================================
-  # VISUAL SEPARATION BLOCKS
-  # --------------------------------------------------------
-  # These are purely UI markers to improve readability:
-  #   - input boundary
-  #   - processing state
-  #   - output boundary
+  # VISUAL OUTPUT SEPARATORS
   # ========================================================
 
   printf "\n________________________________________\n"
   printf "END INPUT\n"
   printf "________________________________________\n"
+
   printf "[%s] Generating response...\n" "$(timestamp)"
+
   printf "________________________________________\n"
   printf "BEGIN OUTPUT\n"
   printf "________________________________________\n\n"
 
 
-  # ==========================================================
-  # BUILD API CONTEXT PAYLOAD
-  # ----------------------------------------------------------
-  # We combine:
-  #   - summary (future expansion)
-  #   - recent message history
-  #   - current user query
-  # ==========================================================
+  # ========================================================
+  # CONTEXT BUILDING
+  # ========================================================
 
   context=$(build_context)
 
 
-  # ==========================================================
-  # API REQUEST
-  # ----------------------------------------------------------
-  # Sends structured JSON payload to Gemini REST API.
-  #
-  # NOTE:
-  #   We intentionally avoid jq dependency to keep portability.
-  # ==========================================================
+  # ========================================================
+  # GEMINI API REQUEST
+  # ========================================================
 
   response=$(curl -s "$URL" \
     -H "Content-Type: application/json" \
     -d "{\"contents\":[{\"parts\":[{\"text\":\"$context\nUser: $buffer\"}]}]}")
 
 
-  # ==========================================================
+  # ========================================================
   # RESPONSE PARSING
-  # ----------------------------------------------------------
-  # Uses python only for JSON extraction to avoid fragile
-  # shell parsing logic.
-  # ==========================================================
+  # ========================================================
 
   output=$(printf '%s' "$response" | python3 -c '
 import sys, json
+
 d = json.load(sys.stdin)
-print(d["candidates"][0]["content"]["parts"][0]["text"])
+
+print(
+  d["candidates"][0]
+   ["content"]["parts"][0]["text"]
+)
 ')
 
 
-  # Fallback safety if API returns unexpected structure
-  [ -z "$output" ] && output="(empty response or API error)"
+  # ========================================================
+  # FALLBACK SAFETY
+  # ========================================================
+
+  [ -z "$output" ] && \
+    output="(empty response or API error)"
 
 
-  # ==========================================================
-  # STORE ASSISTANT RESPONSE
-  # ----------------------------------------------------------
-  # Stored both in:
-  #   - in-memory context window
-  #   - persistent session log file
-  # ==========================================================
+  # ========================================================
+  # STORE FULL RAW OUTPUT IN SESSION LOG
+  # --------------------------------------------------------
+  # IMPORTANT:
+  #   Session logs preserve the original complete response,
+  #   INCLUDING code blocks.
+  #
+  # Terminal display is the only thing cleaned.
+  # ========================================================
 
-  add_to_history "Assistant: $output"
+  printf "[%s] Gemini: %s\n" \
+    "$(timestamp)" \
+    "$output" >> "$SESSION"
 
-  printf "[%s] Gemini: %s\n" "$(timestamp)" "$output" >> "$SESSION"
+
+  # ========================================================
+  # ATTACHMENT EXTRACTION PIPELINE
+  # ========================================================
+
+  cleaned_output=$(printf '%s' "$output" | extract_attachments)
 
 
-  # Print to terminal
-  printf "%s\n\n" "$output"
+  # ========================================================
+  # MEMORY UPDATE
+  # ========================================================
+
+  add_to_history "Assistant: $cleaned_output"
+
+
+  # ========================================================
+  # DISPLAY CLEANED OUTPUT
+  # ========================================================
+
+  printf "%s\n\n" "$cleaned_output"
 
 done
