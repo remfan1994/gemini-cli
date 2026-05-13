@@ -1,0 +1,63 @@
+GPT(1)                      User Commands                      GPT(1)
+
+NAME
+    gpt - terminal-based Gemini chat interface
+
+SYNOPSIS
+    gpt
+    gpt <session_name>
+    gpt --resume <session_name>
+    gpt --list
+
+DESCRIPTION
+    gpt is a lightweight terminal chat client for Google Gemini API.
+    It provides named sessions, timestamped logs, structured output
+    formatting, and lightweight in-session memory.
+
+SESSION MODEL
+    gpt                      Start timestamped session
+    gpt <name>              Start or create named session
+    gpt --resume <name>     Resume named session
+    gpt --list              List available sessions
+
+SESSIONS
+    Sessions are stored as:
+        ~/.gpt/<name>.log
+
+    Default sessions use timestamp-based filenames.
+
+INTERFACE BEHAVIOR
+    - Each message is timestamped
+    - Input and output are separated with visual blocks
+    - Assistant responses are framed with clear markers
+    - Session logs record both user and assistant messages
+
+VISUAL STRUCTURE
+    The interface uses separators:
+
+        END INPUT
+        BEGIN OUTPUT
+
+    to distinguish interaction phases.
+
+MEMORY MODEL
+    The system maintains:
+    - short-term sliding history window
+    - lightweight summarization buffer for older context
+
+LIMITATIONS
+    - Requires Gemini API key (GEMINI_API_KEY)
+    - No full readline support (no rlwrap dependency)
+    - Terminal line editing depends on shell environment
+    - API quota limits apply
+
+FILES
+    ~/.gpt/
+        Session storage directory
+
+ENVIRONMENT
+    GEMINI_API_KEY
+        Required API key for Gemini access
+
+AUTHOR
+    Generated via assistant-guided terminal AI system design
