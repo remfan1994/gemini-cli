@@ -11,12 +11,13 @@
 #   - Timestamped logs
 #   - Lightweight rolling memory
 #   - Config file support
-#   - Attachment extraction system
+#   - Automatic attachment extraction
+#   - Configurable storage directories
 #
 # ATTACHMENT SYSTEM
-#   Code blocks returned by Gemini are automatically:
+#   Code blocks returned by Gemini are:
 #     - extracted from terminal output
-#     - saved into ~/.gpt/attachments/
+#     - saved as reusable files
 #     - replaced with attachment notices
 #
 # DESIGN GOALS
@@ -28,14 +29,103 @@
 
 
 # ==========================================================
-# DIRECTORY SETUP
+# CONFIGURATION LOCATIONS
+# ----------------------------------------------------------
+# CONFIG_DIR
+#   Holds gemini-cli configuration files
+#
+# CONFIG_FILE
+#   Main configuration file
 # ==========================================================
 
 CONFIG_DIR="$HOME/.config/gemini-cli"
 CONFIG_FILE="$CONFIG_DIR/config"
 
+
+# ==========================================================
+# DEFAULT STORAGE LOCATIONS
+# ----------------------------------------------------------
+# These defaults may be overridden in the config file.
+#
+# SESSION_DIR
+#   Stores chat session logs
+#
+# ATTACHMENT_DIR
+#   Stores extracted code blocks/files
+# ==========================================================
+
 SESSION_DIR="$HOME/.gpt"
 ATTACHMENT_DIR="$SESSION_DIR/attachments"
+
+
+# ==========================================================
+# DEFAULT SETTINGS
+# ----------------------------------------------------------
+# These values are fallback defaults and may be overridden
+# by config file values.
+# ==========================================================
+
+MODEL="gemini-2.5-flash"
+
+# Number of recent messages retained in memory context
+HISTORY_LIMIT=12
+
+
+# ==========================================================
+# CONFIG FILE LOADING
+# ----------------------------------------------------------
+# Supported configuration keys:
+#
+#   MODEL
+#   HISTORY_LIMIT
+#   GEMINI_API_KEY
+#   SESSION_DIR
+#   ATTACHMENT_DIR
+#
+# Format:
+#   KEY=VALUE
+# ==========================================================
+
+if [ -f "$CONFIG_FILE" ]; then
+
+  while IFS='=' read -r key value; do
+
+    case "$key" in
+
+      MODEL)
+        MODEL="$value"
+        ;;
+
+      HISTORY_LIMIT)
+        HISTORY_LIMIT="$value"
+        ;;
+
+      GEMINI_API_KEY)
+        GEMINI_API_KEY="${GEMINI_API_KEY:-$value}"
+        ;;
+
+      SESSION_DIR)
+        SESSION_DIR="$value"
+        ;;
+
+      ATTACHMENT_DIR)
+        ATTACHMENT_DIR="$value"
+        ;;
+
+    esac
+
+  done < "$CONFIG_FILE"
+
+fi
+
+
+# ==========================================================
+# ENSURE DIRECTORIES EXIST
+# ----------------------------------------------------------
+# IMPORTANT:
+#   This occurs AFTER config loading so overridden paths
+#   are respected.
+# ==========================================================
 
 mkdir -p "$CONFIG_DIR"
 mkdir -p "$SESSION_DIR"
@@ -43,52 +133,35 @@ mkdir -p "$ATTACHMENT_DIR"
 
 
 # ==========================================================
-# DEFAULT SETTINGS
-# ==========================================================
-
-MODEL="gemini-2.5-flash"
-HISTORY_LIMIT=12
-
-
-# ==========================================================
-# CONFIG FILE LOADING
-# ==========================================================
-
-if [ -f "$CONFIG_FILE" ]; then
-  while IFS='=' read -r key value; do
-    case "$key" in
-      MODEL)
-        MODEL="$value"
-        ;;
-      HISTORY_LIMIT)
-        HISTORY_LIMIT="$value"
-        ;;
-      GEMINI_API_KEY)
-        GEMINI_API_KEY="${GEMINI_API_KEY:-$value}"
-        ;;
-    esac
-  done < "$CONFIG_FILE"
-fi
-
-
-# ==========================================================
 # API KEY VALIDATION
+# ----------------------------------------------------------
+# API key priority:
+#
+#   1. environment variable
+#   2. config file
+#
+# Environment variable is preferred for security.
 # ==========================================================
 
 if [ -z "$GEMINI_API_KEY" ]; then
+
   echo "ERROR: GEMINI_API_KEY not set"
   echo ""
-  echo "Set it either:"
+  echo "Set via:"
   echo "  export GEMINI_API_KEY=your_key"
   echo ""
-  echo "or inside:"
+  echo "or in:"
   echo "  ~/.config/gemini-cli/config"
+
   exit 1
+
 fi
 
 
 # ==========================================================
-# API ENDPOINT
+# GEMINI API ENDPOINT
+# ----------------------------------------------------------
+# Construct endpoint dynamically from selected model.
 # ==========================================================
 
 URL="https://generativelanguage.googleapis.com/v1beta/models/$MODEL:generateContent?key=$GEMINI_API_KEY"
@@ -99,36 +172,58 @@ URL="https://generativelanguage.googleapis.com/v1beta/models/$MODEL:generateCont
 # ==========================================================
 
 USER_NAME="$(whoami)"
+
 HISTORY=()
 SUMMARY=""
 
 
 # ==========================================================
-# UTILITIES
+# TIMESTAMP UTILITY
 # ==========================================================
 
 timestamp() {
   date +"%H:%M:%S"
 }
 
+
+# ==========================================================
+# SESSION UTILITIES
+# ----------------------------------------------------------
+# Sessions are stored as:
+#
+#   SESSION_DIR/<name>.log
+# ==========================================================
+
 resolve_session_path() {
   echo "$SESSION_DIR/$1.log"
 }
 
 list_sessions() {
+
   ls -1 "$SESSION_DIR"/*.log 2>/dev/null \
     | sed 's#.*/##; s/\.log$##'
+
   exit 0
 }
 
 version() {
-  echo "gemini-cli version 2.0"
+
+  echo "gemini-cli version 2.1"
+
   exit 0
 }
 
 
 # ==========================================================
-# SESSION ARGUMENT PARSING
+# ARGUMENT PARSING
+# ----------------------------------------------------------
+# Supported modes:
+#
+#   gemini-cli
+#   gemini-cli <name>
+#   gemini-cli --resume <name>
+#   gemini-cli --list
+#   gemini-cli --version
 # ==========================================================
 
 case "$1" in
@@ -142,24 +237,33 @@ case "$1" in
     ;;
 
   --resume)
-    SESSION="$(resolve_session_path "$2")"
+
     SESSION_NAME="$2"
+    SESSION="$(resolve_session_path "$2")"
+
     ;;
 
   "")
+
     SESSION_NAME="session-$(date +%Y-%m-%d-%H-%M-%S)"
     SESSION="$SESSION_DIR/$SESSION_NAME.log"
+
     ;;
 
   *)
+
     SESSION_NAME="$1"
     SESSION="$(resolve_session_path "$1")"
+
     ;;
+
 esac
 
 
 # ==========================================================
-# STARTUP BANNER
+# STARTUP HEADER
+# ----------------------------------------------------------
+# Display current runtime configuration.
 # ==========================================================
 
 echo "gemini-cli"
@@ -169,10 +273,17 @@ echo ""
 
 
 # ==========================================================
-# MEMORY MANAGEMENT
+# MEMORY SYSTEM
+# ----------------------------------------------------------
+# Lightweight rolling conversation context.
+#
+# Avoids:
+#   - massive token growth
+#   - replaying full logs every request
 # ==========================================================
 
 add_to_history() {
+
   HISTORY+=("$1")
 
   if [ "${#HISTORY[@]}" -gt "$HISTORY_LIMIT" ]; then
@@ -181,6 +292,7 @@ add_to_history() {
 }
 
 build_context() {
+
   context="$SUMMARY\n"
 
   for msg in "${HISTORY[@]}"; do
@@ -192,20 +304,20 @@ build_context() {
 
 
 # ==========================================================
-# ATTACHMENT EXTRACTION
+# ATTACHMENT EXTRACTION SYSTEM
 # ----------------------------------------------------------
-# This function:
-#   - scans Gemini output for fenced code blocks
-#   - saves them into attachment files
-#   - removes them from displayed terminal output
+# Detect fenced markdown code blocks and:
 #
-# Terminal output becomes cleaner while preserving
-# artifacts as reusable files.
+#   - save them into ATTACHMENT_DIR
+#   - replace terminal output with notices
+#
+# Session logs preserve the FULL original response.
 # ==========================================================
 
 extract_attachments() {
 
 python3 - "$ATTACHMENT_DIR" "$SESSION_NAME" <<'PYTHON'
+
 import os
 import re
 import sys
@@ -214,6 +326,7 @@ attachment_dir = sys.argv[1]
 session_name = sys.argv[2]
 
 text = sys.stdin.read()
+
 
 # ==========================================================
 # LANGUAGE -> EXTENSION MAP
@@ -235,14 +348,43 @@ ext_map = {
     "text": ".txt"
 }
 
+
+# ==========================================================
+# ATTACHMENT COUNTER
+# ----------------------------------------------------------
+# Used to generate:
+#
+#   chatname-python-01.py
+#   chatname-bash-02.sh
+# ==========================================================
+
 counter = 1
+
+
+# ==========================================================
+# CODE BLOCK DETECTION
+# ----------------------------------------------------------
+# Matches fenced markdown blocks:
+#
+#   ```python
+#   print("hello")
+#   ```
+# ==========================================================
 
 pattern = re.compile(
     r"```([a-zA-Z0-9_-]*)\n(.*?)```",
     re.DOTALL
 )
 
+
+# ==========================================================
+# REPLACEMENT FUNCTION
+# ----------------------------------------------------------
+# Saves attachment file and returns terminal placeholder.
+# ==========================================================
+
 def replacement(match):
+
     global counter
 
     lang = match.group(1).strip().lower()
@@ -274,9 +416,15 @@ def replacement(match):
         f"location: {attachment_dir}\n"
     )
 
+
+# ==========================================================
+# PROCESS OUTPUT
+# ==========================================================
+
 cleaned = pattern.sub(replacement, text)
 
 print(cleaned)
+
 PYTHON
 
 }
@@ -289,6 +437,11 @@ PYTHON
 while true; do
 
   TS="$(timestamp)"
+
+
+  # ========================================================
+  # USER INPUT
+  # ========================================================
 
   printf "[%s] %s> " "$TS" "$USER_NAME"
 
@@ -310,7 +463,7 @@ while true; do
 
 
   # ========================================================
-  # VISUAL OUTPUT SEPARATORS
+  # VISUAL SEPARATORS
   # ========================================================
 
   printf "\n________________________________________\n"
@@ -325,7 +478,7 @@ while true; do
 
 
   # ========================================================
-  # CONTEXT BUILDING
+  # BUILD CONTEXT
   # ========================================================
 
   context=$(build_context)
@@ -341,11 +494,15 @@ while true; do
 
 
   # ========================================================
-  # RESPONSE PARSING
+  # JSON RESPONSE PARSING
+  # --------------------------------------------------------
+  # Python is used instead of jq to minimize dependencies.
   # ========================================================
 
   output=$(printf '%s' "$response" | python3 -c '
-import sys, json
+
+import sys
+import json
 
 d = json.load(sys.stdin)
 
@@ -353,11 +510,12 @@ print(
   d["candidates"][0]
    ["content"]["parts"][0]["text"]
 )
+
 ')
 
 
   # ========================================================
-  # FALLBACK SAFETY
+  # SAFETY FALLBACK
   # ========================================================
 
   [ -z "$output" ] && \
@@ -365,13 +523,9 @@ print(
 
 
   # ========================================================
-  # STORE FULL RAW OUTPUT IN SESSION LOG
+  # STORE RAW RESPONSE
   # --------------------------------------------------------
-  # IMPORTANT:
-  #   Session logs preserve the original complete response,
-  #   INCLUDING code blocks.
-  #
-  # Terminal display is the only thing cleaned.
+  # Preserve original unmodified Gemini output in session log.
   # ========================================================
 
   printf "[%s] Gemini: %s\n" \
