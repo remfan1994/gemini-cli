@@ -1,84 +1,148 @@
-GEMINI-CLI(1)              User Commands              GEMINI-CLI(1)
+#!/usr/bin/env bash
 
-NAME
-    gemini-cli - terminal-based Gemini chat interface
+# ==========================================================
+# gemini-cli
+# terminal Gemini chat interface
+#
+# REQUIRED:
+#   GEMINI_API_KEY (env OR config file)
+#
+# CONFIG FILE:
+#   ~/.config/gemini-cli/config
+#
+# SECURITY NOTE:
+#   Environment variable is preferred for API keys.
+#   Config file storage is convenience, not secure storage.
+# ==========================================================
 
-SYNOPSIS
-    gemini-cli
-    gemini-cli <session_name>
-    gemini-cli --resume <session_name>
-    gemini-cli --list
-    gemini-cli --version
+CONFIG_DIR="$HOME/.config/gemini-cli"
+CONFIG_FILE="$CONFIG_DIR/config"
 
-DESCRIPTION
-    gemini-cli is a lightweight terminal chat client for the Google
-    Gemini API. It provides persistent sessions, timestamped logs,
-    configurable settings, and lightweight in-session memory.
+mkdir -p "$HOME/.gpt"
+mkdir -p "$CONFIG_DIR"
 
-SESSION MANAGEMENT
-    gemini-cli
-        Start a new timestamped session.
+# ---------- defaults ----------
+MODEL="gemini-2.5-flash"
+HISTORY_LIMIT=12
 
-    gemini-cli <name>
-        Start or create a named session stored as:
-            ~/.gpt/<name>.log
+# ---------- load config ----------
+if [ -f "$CONFIG_FILE" ]; then
+  while IFS='=' read -r key value; do
+    case "$key" in
+      MODEL) MODEL="$value" ;;
+      HISTORY_LIMIT) HISTORY_LIMIT="$value" ;;
+      GEMINI_API_KEY) GEMINI_API_KEY="${GEMINI_API_KEY:-$value}" ;;
+    esac
+  done < "$CONFIG_FILE"
+fi
 
-    gemini-cli --resume <name>
-        Resume an existing session.
+# ---------- env override + validation ----------
+if [ -z "$GEMINI_API_KEY" ]; then
+  echo "ERROR: GEMINI_API_KEY not set (env or config file)"
+  exit 1
+fi
 
-    gemini-cli --list
-        List saved sessions.
+URL="https://generativelanguage.googleapis.com/v1beta/models/$MODEL:generateContent?key=$GEMINI_API_KEY"
 
-    gemini-cli --version
-        Display version information.
+USER_NAME="$(whoami)"
 
-CONFIGURATION
-    Config file location:
-        ~/.config/gemini-cli/config
+HISTORY=()
+SUMMARY=""
 
-    Supported keys:
+timestamp() {
+  date +"%H:%M:%S"
+}
 
-        MODEL
-            Model name used for generation.
-            Default: gemini-2.5-flash
+resolve_session_path() {
+  echo "$HOME/.gpt/$1.log"
+}
 
-        HISTORY_LIMIT
-            Number of recent messages kept in memory.
+list_sessions() {
+  ls -1 "$HOME/.gpt"/*.log 2>/dev/null | sed 's#.*/##; s/\.log$##'
+  exit 0
+}
 
-        GEMINI_API_KEY
-            Optional API key (env overrides this value).
+version() {
+  echo "gemini-cli version 1.0"
+  exit 0
+}
 
-ENVIRONMENT
-    GEMINI_API_KEY
-        Recommended method for supplying API key.
+case "$1" in
+  --version)
+    version
+    ;;
+  --list)
+    list_sessions
+    ;;
+  --resume)
+    SESSION="$(resolve_session_path "$2")"
+    ;;
+  "")
+    SESSION="$HOME/.gpt/session-$(date +%Y-%m-%d-%H-%M-%S).log"
+    ;;
+  *)
+    SESSION="$(resolve_session_path "$1")"
+    ;;
+esac
 
-        Precedence:
-            1. Environment variable (highest priority)
-            2. Config file
+echo "gemini-cli"
+echo "session: $SESSION"
+echo "model: $MODEL"
+echo ""
 
-VISUAL STRUCTURE
-    Conversations are visually separated:
+add_to_history() {
+  HISTORY+=("$1")
 
-        END INPUT
-        BEGIN OUTPUT
+  if [ "${#HISTORY[@]}" -gt "$HISTORY_LIMIT" ]; then
+    HISTORY=("${HISTORY[@]: -6}")
+  fi
+}
 
-    Each message includes timestamps.
+build_context() {
+  context="$SUMMARY\n"
+  for msg in "${HISTORY[@]}"; do
+    context="$context$msg\n"
+  done
+  printf "%s" "$context"
+}
 
-MEMORY MODEL
-    - Short-term sliding history window
-    - Lightweight rolling summary of older context
+while true; do
+  TS="$(timestamp)"
 
-FILES
-    ~/.gpt/
-        Session logs
+  printf "[%s] %s> " "$TS" "$USER_NAME"
+  buffer=$(cat)
 
-    ~/.config/gemini-cli/config
-        User configuration file
+  [ -z "$buffer" ] && continue
 
-LIMITATIONS
-    - Requires internet access
-    - No readline/rlwrap support (basic terminal input only)
-    - API quota limits apply
+  printf "[%s] %s: %s\n" "$TS" "$USER_NAME" "$buffer" >> "$SESSION"
+  add_to_history "User: $buffer"
 
-AUTHOR
-    Generated as a terminal AI interface tool
+  printf "\n________________________________________\n"
+  printf "END INPUT\n"
+  printf "________________________________________\n"
+  printf "[%s] Generating response...\n" "$(timestamp)"
+  printf "________________________________________\n"
+  printf "BEGIN OUTPUT\n"
+  printf "________________________________________\n\n"
+
+  context=$(build_context)
+
+  response=$(curl -s "$URL" \
+    -H "Content-Type: application/json" \
+    -d "{\"contents\":[{\"parts\":[{\"text\":\"$context\nUser: $buffer\"}]}]}")
+
+  output=$(printf '%s' "$response" | python3 -c '
+import sys, json
+d = json.load(sys.stdin)
+print(d["candidates"][0]["content"]["parts"][0]["text"])
+')
+
+  [ -z "$output" ] && output="(empty response or API error)"
+
+  add_to_history "Assistant: $output"
+
+  printf "[%s] Gemini: %s\n" "$(timestamp)" "$output" >> "$SESSION"
+
+  printf "%s\n\n" "$output"
+
+done
