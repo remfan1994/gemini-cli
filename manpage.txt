@@ -11,8 +11,8 @@ SYNOPSIS
     gemini-cli --version
 
 DESCRIPTION
-    gemini-cli is a lightweight terminal chat interface for
-    the Google Gemini API.
+    gemini-cli is a lightweight terminal chat interface
+    for the Google Gemini API.
 
     The tool is designed for:
         - minimal dependencies
@@ -27,6 +27,7 @@ FEATURES
     - Configurable model selection
     - Lightweight rolling memory
     - Automatic code attachment extraction
+    - Configurable storage directories
 
 SESSION MANAGEMENT
     gemini-cli
@@ -62,6 +63,12 @@ CONFIGURATION
         GEMINI_API_KEY
             Optional API key.
 
+        SESSION_DIR
+            Directory used for session log storage.
+
+        ATTACHMENT_DIR
+            Directory used for extracted code artifacts.
+
 ENVIRONMENT
     GEMINI_API_KEY
         Preferred API key source.
@@ -70,9 +77,7 @@ ENVIRONMENT
 
 ATTACHMENT SYSTEM
     Code blocks returned by Gemini are automatically
-    extracted into files under:
-
-        ~/.gpt/attachments/
+    extracted into files under ATTACHMENT_DIR.
 
     Supported attachment types include:
 
@@ -91,10 +96,10 @@ ATTACHMENT SYSTEM
         [attachment saved]
 
 FILES
-    ~/.gpt/
+    SESSION_DIR
         Session logs
 
-    ~/.gpt/attachments/
+    ATTACHMENT_DIR
         Extracted code artifacts
 
     ~/.config/gemini-cli/config
