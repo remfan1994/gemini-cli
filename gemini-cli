@@ -1,13 +1,30 @@
 #!/usr/bin/env bash
 
-MODEL="gemini-2.5-flash"
-URL="https://generativelanguage.googleapis.com/v1beta/models/$MODEL:generateContent?key=$GEMINI_API_KEY"
+CONFIG_DIR="$HOME/.config/gemini-cli"
+CONFIG_FILE="$CONFIG_DIR/config"
 
 mkdir -p "$HOME/.gpt"
+mkdir -p "$CONFIG_DIR"
+
+# ---------- default config ----------
+MODEL="gemini-2.5-flash"
+HISTORY_LIMIT=12
+
+# ---------- load config ----------
+if [ -f "$CONFIG_FILE" ]; then
+  # shell-safe simple key=value loader
+  while IFS='=' read -r key value; do
+    case "$key" in
+      MODEL) MODEL="$value" ;;
+      HISTORY_LIMIT) HISTORY_LIMIT="$value" ;;
+    esac
+  done < "$CONFIG_FILE"
+fi
+
+URL="https://generativelanguage.googleapis.com/v1beta/models/$MODEL:generateContent?key=$GEMINI_API_KEY"
 
 USER_NAME="$(whoami)"
 
-HISTORY_LIMIT=12
 HISTORY=()
 SUMMARY=""
 
@@ -24,7 +41,15 @@ list_sessions() {
   exit 0
 }
 
+version() {
+  echo "gemini-cli version 1.0"
+  exit 0
+}
+
 case "$1" in
+  --version)
+    version
+    ;;
   --list)
     list_sessions
     ;;
@@ -39,8 +64,9 @@ case "$1" in
     ;;
 esac
 
-echo "Gemini CLI"
+echo "gemini-cli"
 echo "session: $SESSION"
+echo "model: $MODEL"
 echo ""
 
 add_to_history() {
@@ -74,7 +100,7 @@ while true; do
   printf "\n________________________________________\n"
   printf "END INPUT\n"
   printf "________________________________________\n"
-  printf "[%s] Gemini is generating a response...\n" "$(timestamp)"
+  printf "[%s] Generating response...\n" "$(timestamp)"
   printf "________________________________________\n"
   printf "BEGIN OUTPUT\n"
   printf "________________________________________\n\n"
