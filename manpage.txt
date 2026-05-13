@@ -24,38 +24,49 @@ SESSION MANAGEMENT
             ~/.gpt/<name>.log
 
     gemini-cli --resume <name>
-        Resume an existing named session.
+        Resume an existing session.
 
     gemini-cli --list
-        List available saved sessions.
+        List saved sessions.
 
     gemini-cli --version
-        Display installed version.
+        Display version information.
 
 CONFIGURATION
-    Configuration file:
+    Config file location:
         ~/.config/gemini-cli/config
 
     Supported keys:
 
         MODEL
-            Gemini model name (default: gemini-2.5-flash)
+            Model name used for generation.
+            Default: gemini-2.5-flash
 
         HISTORY_LIMIT
-            Number of recent messages kept in memory
+            Number of recent messages kept in memory.
+
+        GEMINI_API_KEY
+            Optional API key (env overrides this value).
+
+ENVIRONMENT
+    GEMINI_API_KEY
+        Recommended method for supplying API key.
+
+        Precedence:
+            1. Environment variable (highest priority)
+            2. Config file
 
 VISUAL STRUCTURE
-    Messages are separated using clear blocks:
+    Conversations are visually separated:
 
         END INPUT
         BEGIN OUTPUT
 
-    Each message is timestamped for clarity.
+    Each message includes timestamps.
 
 MEMORY MODEL
-    The system maintains:
-        - short-term message history window
-        - lightweight rolling summary of older context
+    - Short-term sliding history window
+    - Lightweight rolling summary of older context
 
 FILES
     ~/.gpt/
@@ -64,14 +75,10 @@ FILES
     ~/.config/gemini-cli/config
         User configuration file
 
-ENVIRONMENT
-    GEMINI_API_KEY
-        Required API key for Gemini access
-
 LIMITATIONS
     - Requires internet access
-    - No readline/rlwrap dependency (limited line editing)
-    - API quota restrictions apply
+    - No readline/rlwrap support (basic terminal input only)
+    - API quota limits apply
 
 AUTHOR
     Generated as a terminal AI interface tool
