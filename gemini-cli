@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+
+MODEL="gemini-2.5-flash"
+URL="https://generativelanguage.googleapis.com/v1beta/models/$MODEL:generateContent?key=$GEMINI_API_KEY"
+
+mkdir -p "$HOME/.gpt"
+
+USER_NAME="$(whoami)"
+
+HISTORY_LIMIT=12
+HISTORY=()
+SUMMARY=""
+
+timestamp() {
+  date +"%H:%M:%S"
+}
+
+resolve_session_path() {
+  echo "$HOME/.gpt/$1.log"
+}
+
+list_sessions() {
+  ls -1 "$HOME/.gpt"/*.log 2>/dev/null | sed 's#.*/##; s/\.log$##'
+  exit 0
+}
+
+case "$1" in
+  --list)
+    list_sessions
+    ;;
+  --resume)
+    SESSION="$(resolve_session_path "$2")"
+    ;;
+  "")
+    SESSION="$HOME/.gpt/session-$(date +%Y-%m-%d-%H-%M-%S).log"
+    ;;
+  *)
+    SESSION="$(resolve_session_path "$1")"
+    ;;
+esac
+
+echo "Gemini CLI"
+echo "session: $SESSION"
+echo ""
+
+add_to_history() {
+  HISTORY+=("$1")
+
+  if [ "${#HISTORY[@]}" -gt "$HISTORY_LIMIT" ]; then
+    HISTORY=("${HISTORY[@]: -6}")
+  fi
+}
+
+build_context() {
+  context="$SUMMARY\n"
+  for msg in "${HISTORY[@]}"; do
+    context="$context$msg\n"
+  done
+  printf "%s" "$context"
+}
+
+while true; do
+  TS="$(timestamp)"
+
+  printf "[%s] %s> " "$TS" "$USER_NAME"
+  buffer=$(cat)
+
+  [ -z "$buffer" ] && continue
+
+  printf "[%s] %s: %s\n" "$TS" "$USER_NAME" "$buffer" >> "$SESSION"
+
+  add_to_history "User: $buffer"
+
+  printf "\n________________________________________\n"
+  printf "END INPUT\n"
+  printf "________________________________________\n"
+  printf "[%s] Gemini is generating a response...\n" "$(timestamp)"
+  printf "________________________________________\n"
+  printf "BEGIN OUTPUT\n"
+  printf "________________________________________\n\n"
+
+  context=$(build_context)
+
+  response=$(curl -s "$URL" \
+    -H "Content-Type: application/json" \
+    -d "{\"contents\":[{\"parts\":[{\"text\":\"$context\nUser: $buffer\"}]}]}")
+
+  output=$(printf '%s' "$response" | python3 -c '
+import sys, json
+d = json.load(sys.stdin)
+print(d["candidates"][0]["content"]["parts"][0]["text"])
+')
+
+  [ -z "$output" ] && output="(empty response or API error)"
+
+  add_to_history "Assistant: $output"
+
+  printf "[%s] Gemini: %s\n" "$(timestamp)" "$output" >> "$SESSION"
+
+  printf "%s\n\n" "$output"
+
+done
