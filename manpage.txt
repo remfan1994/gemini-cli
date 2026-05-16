@@ -9,6 +9,8 @@ SYNOPSIS
     gemini-cli --resume <session_name>
     gemini-cli --list
     gemini-cli --version
+    gemini-cli --help
+    gemini-cli -h
 
 DESCRIPTION
     gemini-cli is a lightweight terminal chat interface
@@ -29,6 +31,13 @@ FEATURES
     - Automatic code attachment extraction
     - Configurable storage directories
 
+HELP SYSTEM
+    Built-in usage help is available directly from the
+    command line via:
+
+        gemini-cli --help
+        gemini-cli -h
+
 SESSION MANAGEMENT
     gemini-cli
         Start new timestamped session.
@@ -44,6 +53,10 @@ SESSION MANAGEMENT
 
     gemini-cli --version
         Display version information.
+
+    gemini-cli --help
+    gemini-cli -h
+        Display built-in help summary.
 
 CONFIGURATION
     Config file:
