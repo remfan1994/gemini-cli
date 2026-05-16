@@ -3,7 +3,7 @@
 # ==========================================================
 # gemini-cli
 # ----------------------------------------------------------
-# Terminal-based Gemini AI interface
+# Terminal-based Gemini AI workspace
 #
 # FEATURES
 #   - Persistent chat sessions
@@ -11,12 +11,14 @@
 #   - Timestamped logs
 #   - Lightweight rolling memory
 #   - Config file support
+#   - Built-in help/version system
 #   - Automatic attachment extraction
 #   - Configurable storage directories
 #
 # ATTACHMENT SYSTEM
-#   Code blocks returned by Gemini are:
-#     - extracted from terminal output
+#   Markdown fenced code blocks returned by Gemini are:
+#
+#     - removed from terminal output
 #     - saved as reusable files
 #     - replaced with attachment notices
 #
@@ -25,6 +27,7 @@
 #   - shell-friendly
 #   - readable logs
 #   - artifact-oriented workflow
+#   - publishable architecture
 # ==========================================================
 
 
@@ -32,10 +35,10 @@
 # CONFIGURATION LOCATIONS
 # ----------------------------------------------------------
 # CONFIG_DIR
-#   Holds gemini-cli configuration files
+#   Stores gemini-cli configuration files
 #
 # CONFIG_FILE
-#   Main configuration file
+#   Main runtime configuration file
 # ==========================================================
 
 CONFIG_DIR="$HOME/.config/gemini-cli"
@@ -45,13 +48,13 @@ CONFIG_FILE="$CONFIG_DIR/config"
 # ==========================================================
 # DEFAULT STORAGE LOCATIONS
 # ----------------------------------------------------------
-# These defaults may be overridden in the config file.
+# These defaults may be overridden inside the config file.
 #
 # SESSION_DIR
-#   Stores chat session logs
+#   Stores persistent conversation logs
 #
 # ATTACHMENT_DIR
-#   Stores extracted code blocks/files
+#   Stores extracted code artifacts
 # ==========================================================
 
 SESSION_DIR="$HOME/.gpt"
@@ -62,12 +65,13 @@ ATTACHMENT_DIR="$SESSION_DIR/attachments"
 # DEFAULT SETTINGS
 # ----------------------------------------------------------
 # These values are fallback defaults and may be overridden
-# by config file values.
+# by configuration file values.
 # ==========================================================
 
 MODEL="gemini-2.5-flash"
 
-# Number of recent messages retained in memory context
+# Number of recent conversational entries retained
+# in the rolling context window.
 HISTORY_LIMIT=12
 
 
@@ -84,6 +88,12 @@ HISTORY_LIMIT=12
 #
 # Format:
 #   KEY=VALUE
+#
+# Example:
+#
+#   MODEL=gemini-2.5-flash
+#   HISTORY_LIMIT=20
+#   SESSION_DIR=/home/user/history
 # ==========================================================
 
 if [ -f "$CONFIG_FILE" ]; then
@@ -120,11 +130,11 @@ fi
 
 
 # ==========================================================
-# ENSURE DIRECTORIES EXIST
+# ENSURE STORAGE DIRECTORIES EXIST
 # ----------------------------------------------------------
 # IMPORTANT:
-#   This occurs AFTER config loading so overridden paths
-#   are respected.
+#   This occurs AFTER config parsing so user-overridden
+#   paths are respected.
 # ==========================================================
 
 mkdir -p "$CONFIG_DIR"
@@ -140,7 +150,8 @@ mkdir -p "$ATTACHMENT_DIR"
 #   1. environment variable
 #   2. config file
 #
-# Environment variable is preferred for security.
+# Environment variables are preferred because they avoid
+# storing secrets in plaintext configuration files.
 # ==========================================================
 
 if [ -z "$GEMINI_API_KEY" ]; then
@@ -150,7 +161,7 @@ if [ -z "$GEMINI_API_KEY" ]; then
   echo "Set via:"
   echo "  export GEMINI_API_KEY=your_key"
   echo ""
-  echo "or in:"
+  echo "or inside:"
   echo "  ~/.config/gemini-cli/config"
 
   exit 1
@@ -162,6 +173,8 @@ fi
 # GEMINI API ENDPOINT
 # ----------------------------------------------------------
 # Construct endpoint dynamically from selected model.
+#
+# This allows model changes without script modification.
 # ==========================================================
 
 URL="https://generativelanguage.googleapis.com/v1beta/models/$MODEL:generateContent?key=$GEMINI_API_KEY"
@@ -169,6 +182,15 @@ URL="https://generativelanguage.googleapis.com/v1beta/models/$MODEL:generateCont
 
 # ==========================================================
 # RUNTIME VARIABLES
+# ----------------------------------------------------------
+# USER_NAME
+#   Used for terminal display and logging
+#
+# HISTORY
+#   Rolling conversational context window
+#
+# SUMMARY
+#   Placeholder for future summarization system
 # ==========================================================
 
 USER_NAME="$(whoami)"
@@ -179,6 +201,12 @@ SUMMARY=""
 
 # ==========================================================
 # TIMESTAMP UTILITY
+# ----------------------------------------------------------
+# Standardized timestamp format for:
+#
+#   - prompts
+#   - logs
+#   - status messages
 # ==========================================================
 
 timestamp() {
@@ -189,9 +217,11 @@ timestamp() {
 # ==========================================================
 # SESSION UTILITIES
 # ----------------------------------------------------------
-# Sessions are stored as:
+# Session files are stored as:
 #
 #   SESSION_DIR/<name>.log
+#
+# These helper functions centralize session operations.
 # ==========================================================
 
 resolve_session_path() {
@@ -206,11 +236,98 @@ list_sessions() {
   exit 0
 }
 
+
+# ==========================================================
+# VERSION DISPLAY
+# ----------------------------------------------------------
+# Simple machine-readable version output.
+#
+# This becomes important for:
+#   - debugging
+#   - issue reporting
+#   - release tracking
+# ==========================================================
+
 version() {
 
-  echo "gemini-cli version 2.1"
+  echo "gemini-cli version 2.2"
 
   exit 0
+}
+
+
+# ==========================================================
+# BUILT-IN HELP SYSTEM
+# ----------------------------------------------------------
+# Self-documenting command-line usage reference.
+#
+# Supported aliases:
+#
+#   -h
+#   --help
+#   help
+#
+# This avoids forcing users to open:
+#   - README
+#   - man page
+#   - source code
+#
+# for basic operational reminders.
+# ==========================================================
+
+help_menu() {
+
+cat <<EOF
+
+gemini-cli - terminal Gemini interface
+
+USAGE
+    gemini-cli
+        Start new timestamped session
+
+    gemini-cli <name>
+        Start/create named session
+
+    gemini-cli --resume <name>
+        Resume named session
+
+    gemini-cli --list
+        List saved sessions
+
+    gemini-cli --version
+        Show version information
+
+    gemini-cli --help
+    gemini-cli -h
+        Show this help screen
+
+CONFIG FILE
+    ~/.config/gemini-cli/config
+
+SUPPORTED CONFIG KEYS
+    MODEL
+    HISTORY_LIMIT
+    GEMINI_API_KEY
+    SESSION_DIR
+    ATTACHMENT_DIR
+
+ATTACHMENT SYSTEM
+    Markdown fenced code blocks returned by Gemini
+    are automatically extracted into attachment files.
+
+FILES
+    Session logs:
+        SESSION_DIR
+
+    Attachments:
+        ATTACHMENT_DIR
+
+VERSION
+    gemini-cli version 2.2
+
+EOF
+
+exit 0
 }
 
 
@@ -224,16 +341,30 @@ version() {
 #   gemini-cli --resume <name>
 #   gemini-cli --list
 #   gemini-cli --version
+#   gemini-cli --help
+#
+# CLI STRUCTURE PRINCIPLE
+#   Keep argument behavior explicit and stable.
 # ==========================================================
 
 case "$1" in
 
+  -h|--help|help)
+
+    help_menu
+
+    ;;
+
   --version)
+
     version
+
     ;;
 
   --list)
+
     list_sessions
+
     ;;
 
   --resume)
@@ -263,7 +394,7 @@ esac
 # ==========================================================
 # STARTUP HEADER
 # ----------------------------------------------------------
-# Display current runtime configuration.
+# Display current runtime information for visibility.
 # ==========================================================
 
 echo "gemini-cli"
@@ -275,11 +406,12 @@ echo ""
 # ==========================================================
 # MEMORY SYSTEM
 # ----------------------------------------------------------
-# Lightweight rolling conversation context.
+# Lightweight rolling conversational memory.
 #
 # Avoids:
-#   - massive token growth
-#   - replaying full logs every request
+#   - uncontrolled token growth
+#   - replaying entire logs every request
+#   - massive API payloads
 # ==========================================================
 
 add_to_history() {
@@ -309,9 +441,13 @@ build_context() {
 # Detect fenced markdown code blocks and:
 #
 #   - save them into ATTACHMENT_DIR
-#   - replace terminal output with notices
+#   - remove them from displayed terminal output
+#   - replace them with attachment notices
 #
-# Session logs preserve the FULL original response.
+# IMPORTANT DESIGN DECISION
+#   Session logs preserve FULL raw Gemini output.
+#
+# Only terminal display is cleaned.
 # ==========================================================
 
 extract_attachments() {
@@ -330,6 +466,9 @@ text = sys.stdin.read()
 
 # ==========================================================
 # LANGUAGE -> EXTENSION MAP
+# ----------------------------------------------------------
+# Determines attachment file extension based on markdown
+# fence language identifier.
 # ==========================================================
 
 ext_map = {
@@ -352,17 +491,17 @@ ext_map = {
 # ==========================================================
 # ATTACHMENT COUNTER
 # ----------------------------------------------------------
-# Used to generate:
+# Generates filenames like:
 #
-#   chatname-python-01.py
-#   chatname-bash-02.sh
+#   mychat-python-01.py
+#   mychat-bash-02.sh
 # ==========================================================
 
 counter = 1
 
 
 # ==========================================================
-# CODE BLOCK DETECTION
+# MARKDOWN CODE BLOCK DETECTION
 # ----------------------------------------------------------
 # Matches fenced markdown blocks:
 #
@@ -380,7 +519,8 @@ pattern = re.compile(
 # ==========================================================
 # REPLACEMENT FUNCTION
 # ----------------------------------------------------------
-# Saves attachment file and returns terminal placeholder.
+# Saves extracted code into attachment files and returns
+# placeholder text for terminal display.
 # ==========================================================
 
 def replacement(match):
@@ -418,7 +558,7 @@ def replacement(match):
 
 
 # ==========================================================
-# PROCESS OUTPUT
+# PROCESS GEMINI OUTPUT
 # ==========================================================
 
 cleaned = pattern.sub(replacement, text)
@@ -432,6 +572,16 @@ PYTHON
 
 # ==========================================================
 # MAIN CHAT LOOP
+# ----------------------------------------------------------
+# Core runtime loop:
+#
+#   1. receive user input
+#   2. log input
+#   3. build conversational context
+#   4. call Gemini API
+#   5. extract attachments
+#   6. display cleaned output
+#   7. update rolling memory
 # ==========================================================
 
 while true; do
@@ -441,6 +591,10 @@ while true; do
 
   # ========================================================
   # USER INPUT
+  # --------------------------------------------------------
+  # Uses stdin-based multiline input.
+  #
+  # Input ends when stdin closes (Ctrl+D).
   # ========================================================
 
   printf "[%s] %s> " "$TS" "$USER_NAME"
@@ -464,6 +618,8 @@ while true; do
 
   # ========================================================
   # VISUAL SEPARATORS
+  # --------------------------------------------------------
+  # Improves readability during long conversations.
   # ========================================================
 
   printf "\n________________________________________\n"
@@ -486,6 +642,11 @@ while true; do
 
   # ========================================================
   # GEMINI API REQUEST
+  # --------------------------------------------------------
+  # Sends conversational context to Gemini REST API.
+  #
+  # Dependency strategy:
+  #   Use curl directly to minimize stack complexity.
   # ========================================================
 
   response=$(curl -s "$URL" \
@@ -496,7 +657,10 @@ while true; do
   # ========================================================
   # JSON RESPONSE PARSING
   # --------------------------------------------------------
-  # Python is used instead of jq to minimize dependencies.
+  # Python is used instead of jq to:
+  #
+  #   - reduce dependency requirements
+  #   - avoid shell JSON parsing fragility
   # ========================================================
 
   output=$(printf '%s' "$response" | python3 -c '
@@ -516,6 +680,8 @@ print(
 
   # ========================================================
   # SAFETY FALLBACK
+  # --------------------------------------------------------
+  # Prevent empty terminal output on malformed responses.
   # ========================================================
 
   [ -z "$output" ] && \
@@ -525,7 +691,9 @@ print(
   # ========================================================
   # STORE RAW RESPONSE
   # --------------------------------------------------------
-  # Preserve original unmodified Gemini output in session log.
+  # Preserve original FULL Gemini output in session logs.
+  #
+  # Logs remain authoritative archival history.
   # ========================================================
 
   printf "[%s] Gemini: %s\n" \
