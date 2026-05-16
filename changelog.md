@@ -1,4 +1,19 @@
 # Changelog
+## 2.2
+
+### Added
+- Built-in help system
+- -h alias
+- --help alias
+- help command alias
+
+### Changed
+- CLI became self-documenting
+- Added internal usage reference output
+
+### Documentation
+- Updated man page synopsis
+- Added help system documentation
 
 ## 2.1
 
