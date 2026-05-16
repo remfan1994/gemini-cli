@@ -1,5 +1,3 @@
-Designed on ChromeOS, check compatibility!
-
 License follows:
 Insha-Allah License Agreement
 Effective immediately upon acknowledgment by the Licensee.
