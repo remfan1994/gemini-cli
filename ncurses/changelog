@@ -1,4 +1,39 @@
 # Changelog
+## 0.4.0
+
+### Added
+- `CONTEXT_TURNS` config key for clearer conversation-memory terminology
+- Backward compatibility for legacy `HISTORY_LIMIT` config key
+- Autoscan challenge validation
+- Default autoscan prompt: `What is the capital of Texas?`
+- Default autoscan expected substring: `austin`
+- `AUTOSCAN_PROMPT` config key
+- `AUTOSCAN_EXPECTED` config key
+- Autoscan failure reporting when a model returns text but fails the expected-answer check
+
+### Changed
+- Autoscan no longer accepts any non-empty text response as success
+- Autoscan now requires the response to contain the expected answer substring
+- Internal memory variable renamed from history-style terminology to context-buffer terminology
+- `CONTEXT_TURNS` now represents user/assistant exchanges rather than individual log entries
+- Resume memory rebuild now keeps up to `CONTEXT_TURNS * 2` speaker entries from the session log
+- Man page now describes `HISTORY_LIMIT` as a legacy alias instead of the preferred setting
+
+### Documentation
+- Updated CONFIGURATION section with `CONTEXT_TURNS`
+- Documented legacy `HISTORY_LIMIT`
+- Added autoscan challenge details
+- Documented `AUTOSCAN_PROMPT`
+- Documented `AUTOSCAN_EXPECTED`
+- Updated MEMORY MODEL section
+- Updated MODEL AUTOSCAN section
+- Updated LIMITATIONS section to clarify autoscan verifies only the configured challenge
+
+### Notes
+- The autoscan challenge is intentionally empirical and configurable.
+- The default Texas/Austin challenge is used to reduce false positives from models that merely return any non-empty text.
+- This update does not change the Bash implementation; Bash parity should be handled in the next Bash-specific revision.
+
 ## 0.3.0
 
 ### Added
