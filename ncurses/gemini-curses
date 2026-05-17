@@ -2,12 +2,11 @@
 """
 gemini-curses
 
-A first ncurses-based Gemini terminal interface.
+A Python ncurses interface for the gemini-cli terminal AI workspace.
 
-This version keeps the project philosophy of the Bash edition while moving
-the interactive user interface into curses. The main purpose is to fix the
-line-editing and terminal-redraw problems that are difficult to solve cleanly
-in Bash.
+This program is intentionally kept dependency-light. It uses only Python's
+standard library: curses for the terminal UI, urllib for HTTP, and json for
+request/response handling.
 """
 
 from __future__ import annotations
@@ -20,22 +19,23 @@ import re
 import sys
 import textwrap
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 PROGRAM = "gemini-curses"
 
 
 # ---------------------------------------------------------------------------
 # Configuration model
 # ---------------------------------------------------------------------------
-# The ncurses edition intentionally uses the same config keys as the Bash
-# edition so users can move between the two interfaces without maintaining two
-# separate configuration systems.
+# The ncurses edition intentionally shares configuration keys with the Bash
+# edition. A user should be able to move between the minimal Bash client and
+# the curses interface without maintaining separate config files.
 # ---------------------------------------------------------------------------
 
 
@@ -46,6 +46,9 @@ class Config:
     api_key: str = ""
     session_dir: Path = field(default_factory=lambda: Path.home() / ".gpt")
     attachment_dir: Optional[Path] = None
+    config_file: Path = field(
+        default_factory=lambda: Path.home() / ".config" / "gemini-cli" / "config"
+    )
 
     @property
     def effective_attachment_dir(self) -> Path:
@@ -55,24 +58,30 @@ class Config:
 
 
 def expand_path(value: str) -> Path:
-    """Expand ~ and environment variables in a user-supplied path."""
+    """Expand ~ and environment variables in paths from the config file."""
     return Path(os.path.expandvars(os.path.expanduser(value))).resolve()
+
+
+def normalize_model_id(value: str) -> str:
+    """Accept either 'gemini-x' or 'models/gemini-x' and store 'gemini-x'."""
+    value = value.strip()
+    if value.startswith("models/"):
+        value = value.split("/", 1)[1]
+    return value
 
 
 def load_config() -> Config:
     """Load ~/.config/gemini-cli/config using simple KEY=VALUE parsing."""
     cfg = Config()
-    config_file = Path.home() / ".config" / "gemini-cli" / "config"
-
     env_api_key = os.environ.get("GEMINI_API_KEY", "")
 
-    if config_file.exists():
-        with config_file.open("r", encoding="utf-8") as fh:
+    if cfg.config_file.exists():
+        with cfg.config_file.open("r", encoding="utf-8") as fh:
             for raw_line in fh:
                 line = raw_line.strip()
 
-                # Empty lines and comment lines are ignored. This keeps the
-                # config file friendly to humans without adding a full parser.
+                # Empty lines and comments are ignored. This keeps the config
+                # file friendly without requiring TOML, YAML, or JSON.
                 if not line or line.startswith("#"):
                     continue
 
@@ -84,15 +93,15 @@ def load_config() -> Config:
                 value = value.strip()
 
                 if key == "MODEL":
-                    cfg.model = value
+                    cfg.model = normalize_model_id(value)
                 elif key == "HISTORY_LIMIT":
                     try:
                         cfg.history_limit = max(1, int(value))
                     except ValueError:
                         cfg.history_limit = 12
                 elif key == "GEMINI_API_KEY":
-                    # The environment variable wins. Config-file API keys are
-                    # convenient, but environment variables are safer.
+                    # Environment variable wins. Config-file keys are
+                    # convenient but less secure on shared machines.
                     cfg.api_key = env_api_key or value
                 elif key == "SESSION_DIR":
                     cfg.session_dir = expand_path(value)
@@ -105,14 +114,48 @@ def load_config() -> Config:
     return cfg
 
 
+def set_config_value(cfg: Config, key: str, value: str) -> None:
+    """Create/update a KEY=VALUE entry in the config file.
+
+    This is used by the ncurses UI for two interactive setup actions:
+    saving a pasted API key and saving a selected model.
+    """
+    cfg.config_file.parent.mkdir(parents=True, exist_ok=True)
+    lines: List[str] = []
+    replaced = False
+
+    if cfg.config_file.exists():
+        lines = cfg.config_file.read_text(encoding="utf-8", errors="replace").splitlines()
+
+    new_lines: List[str] = []
+    for line in lines:
+        if line.strip().startswith(f"{key}="):
+            new_lines.append(f"{key}={value}")
+            replaced = True
+        else:
+            new_lines.append(line)
+
+    if not replaced:
+        new_lines.append(f"{key}={value}")
+
+    cfg.config_file.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+
+    # If users save API keys in config, make the file private where possible.
+    try:
+        os.chmod(cfg.config_file, 0o600)
+    except OSError:
+        pass
+
+
 # ---------------------------------------------------------------------------
 # Command-line parsing
 # ---------------------------------------------------------------------------
-# The interface mirrors the Bash version:
+# The interface mirrors the Bash version where it makes sense:
 #   gemini-curses
 #   gemini-curses name
 #   gemini-curses --resume name
 #   gemini-curses --list
+#   gemini-curses --models
 #   gemini-curses --version
 # ---------------------------------------------------------------------------
 
@@ -141,6 +184,11 @@ def parse_args() -> argparse.Namespace:
         help="list saved sessions",
     )
     parser.add_argument(
+        "--models",
+        action="store_true",
+        help="list available Gemini generation models and exit",
+    )
+    parser.add_argument(
         "--version",
         action="store_true",
         help="show version information",
@@ -166,19 +214,85 @@ def list_sessions(session_dir: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Gemini API transport
+# Gemini API transport and model discovery
 # ---------------------------------------------------------------------------
-# This uses urllib from the Python standard library instead of requests. That
-# keeps the ncurses version dependency-light while still giving reliable JSON
-# request construction. This also fixes many shell-escaping problems from the
-# Bash implementation because json.dumps handles quotes, slashes, and newlines.
+# The models list endpoint is useful because model names change over time.
+# Users can discover valid model IDs and put one in the config as MODEL=...
 # ---------------------------------------------------------------------------
+
+
+@dataclass
+class GeminiModel:
+    model_id: str
+    display_name: str
+    methods: List[str]
+    description: str = ""
+
+
+def gemini_models_url(api_key: str, page_token: str = "") -> str:
+    query = {"key": api_key, "pageSize": "100"}
+    if page_token:
+        query["pageToken"] = page_token
+    return "https://generativelanguage.googleapis.com/v1beta/models?" + urllib.parse.urlencode(query)
+
+
+def fetch_gemini_models(cfg: Config) -> Tuple[List[GeminiModel], str]:
+    """Fetch available models that support generateContent."""
+    if not cfg.api_key:
+        return [], "GEMINI_API_KEY is not set"
+
+    models: List[GeminiModel] = []
+    page_token = ""
+
+    while True:
+        request = urllib.request.Request(gemini_models_url(cfg.api_key, page_token), method="GET")
+
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                body = response.read().decode("utf-8", errors="replace")
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            return [], f"HTTP error {exc.code}: {body[:1000]}"
+        except urllib.error.URLError as exc:
+            return [], f"network error: {exc}"
+        except Exception as exc:
+            return [], f"request error: {exc}"
+
+        try:
+            parsed = json.loads(body)
+        except json.JSONDecodeError as exc:
+            return [], f"JSON parse error: {exc}"
+
+        for item in parsed.get("models", []):
+            name = item.get("name", "")
+            model_id = normalize_model_id(name)
+            methods = item.get("supportedGenerationMethods", []) or []
+
+            # The chat interface needs models that can generate content.
+            if "generateContent" not in methods:
+                continue
+
+            models.append(
+                GeminiModel(
+                    model_id=model_id,
+                    display_name=item.get("displayName") or model_id,
+                    methods=methods,
+                    description=item.get("description", ""),
+                )
+            )
+
+        page_token = parsed.get("nextPageToken", "")
+        if not page_token:
+            break
+
+    models.sort(key=lambda m: m.model_id)
+    return models, ""
 
 
 def call_gemini(cfg: Config, prompt_text: str) -> str:
     url = (
         "https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{cfg.model}:generateContent?key={cfg.api_key}"
+        f"{normalize_model_id(cfg.model)}:generateContent?key={urllib.parse.quote(cfg.api_key)}"
     )
 
     payload = {
@@ -222,8 +336,8 @@ def call_gemini(cfg: Config, prompt_text: str) -> str:
 # ---------------------------------------------------------------------------
 # Session log parsing and writing
 # ---------------------------------------------------------------------------
-# Logs remain plain text. The TUI can rebuild a small memory window from an
-# existing session log, but it does not need a database or binary state file.
+# Logs remain plain text. Resuming a session rebuilds recent memory from the
+# log instead of requiring a separate state database.
 # ---------------------------------------------------------------------------
 
 
@@ -272,9 +386,9 @@ def load_log_entries(path: Path) -> List[LogEntry]:
 # ---------------------------------------------------------------------------
 # Attachment extraction
 # ---------------------------------------------------------------------------
-# Fenced markdown code blocks are saved to files and replaced in the transcript
-# display with attachment notices. The raw Gemini response is still written to
-# the log before extraction, so logs remain authoritative.
+# Fenced markdown code blocks are saved to files and replaced in transcript
+# display with attachment notices. Raw Gemini output is still written to the
+# log before extraction, so logs preserve the complete response.
 # ---------------------------------------------------------------------------
 
 
@@ -348,8 +462,9 @@ def extract_attachments(text: str, attachment_dir: Path, session_name: str) -> s
 # ---------------------------------------------------------------------------
 # Text wrapping helpers
 # ---------------------------------------------------------------------------
-# Curses requires careful bounds handling. These helpers prevent addstr calls
-# from writing past the right edge of the terminal and causing curses.error.
+# Curses does not automatically handle safe wrapping and bounds checking in a
+# way that is appropriate for a custom interface. These helpers centralize the
+# wrapping logic.
 # ---------------------------------------------------------------------------
 
 
@@ -380,9 +495,9 @@ def now_time() -> str:
 # ---------------------------------------------------------------------------
 # Curses application
 # ---------------------------------------------------------------------------
-# This is intentionally a first usable TUI rather than a perfect terminal app.
-# It fixes the largest Bash problems: redraws, cursor control, multi-line input,
-# scrolling, and JSON escaping.
+# This TUI focuses on solving the Bash version's known input problems:
+# cursor movement, screen redraw, multiline text, wrapped text, and safe JSON
+# request construction.
 # ---------------------------------------------------------------------------
 
 
@@ -394,7 +509,7 @@ class TranscriptItem:
 
 
 class GeminiCursesApp:
-    INPUT_HEIGHT = 5
+    INPUT_HEIGHT = 6
 
     def __init__(self, cfg: Config, session_name: str, session_path: Path):
         self.cfg = cfg
@@ -410,14 +525,14 @@ class GeminiCursesApp:
         self.input_lines: List[str] = [""]
         self.cursor_row = 0
         self.cursor_col = 0
-        self.input_scroll = 0
+        self.input_visual_scroll = 0
 
-        self.status = "Enter=newline | Ctrl+G/F5=send | F10/Ctrl+Q=quit | PgUp/PgDn=scroll"
+        self.status = "Enter=newline | Ctrl+G/F5=send | F2=models | F3=API key | F10/Ctrl+Q=quit"
         self.should_quit = False
 
-    # ---------------------------------------------------------------------
+    # ------------------------------------------------------------------
     # Memory model
-    # ---------------------------------------------------------------------
+    # ------------------------------------------------------------------
 
     def load_memory_from_session(self) -> None:
         entries = load_log_entries(self.session_path)
@@ -432,10 +547,7 @@ class GeminiCursesApp:
 
         self.trim_history()
         self.transcript.append(
-            TranscriptItem(
-                "system",
-                f"Loaded memory from existing session: {self.session_name}",
-            )
+            TranscriptItem("system", f"Loaded memory from session: {self.session_name}")
         )
 
     def trim_history(self) -> None:
@@ -445,11 +557,11 @@ class GeminiCursesApp:
     def build_context(self) -> str:
         return "\n".join(self.history)
 
-    # ---------------------------------------------------------------------
-    # Curses drawing
-    # ---------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Safe drawing primitives
+    # ------------------------------------------------------------------
 
-    def safe_addstr(self, y: int, x: int, text: str, max_width: Optional[int] = None) -> None:
+    def safe_addstr(self, y: int, x: int, text: str, max_width: Optional[int] = None, attr: int = 0) -> None:
         height, width = self.stdscr.getmaxyx()
         if y < 0 or y >= height or x < 0 or x >= width:
             return
@@ -459,9 +571,227 @@ class GeminiCursesApp:
         if limit <= 0:
             return
         try:
-            self.stdscr.addstr(y, x, text[: max(0, limit - 1)])
+            self.stdscr.addstr(y, x, text[: max(0, limit - 1)], attr)
         except curses.error:
             pass
+
+    def draw_box(self, top: int, left: int, height: int, width: int, title: str = "") -> None:
+        if height < 3 or width < 10:
+            return
+        horizontal = "-" * max(0, width - 2)
+        self.safe_addstr(top, left, "+" + horizontal + "+")
+        for row in range(1, height - 1):
+            self.safe_addstr(top + row, left, "|")
+            self.safe_addstr(top + row, left + width - 1, "|")
+        self.safe_addstr(top + height - 1, left, "+" + horizontal + "+")
+        if title:
+            self.safe_addstr(top, left + 2, f" {title} ", width - 4, curses.A_REVERSE)
+
+    # ------------------------------------------------------------------
+    # General modal helpers
+    # ------------------------------------------------------------------
+
+    def modal_geometry(self, desired_h: int = 14, desired_w: int = 72) -> Tuple[int, int, int, int]:
+        screen_h, screen_w = self.stdscr.getmaxyx()
+        h = min(desired_h, max(5, screen_h - 2))
+        w = min(desired_w, max(30, screen_w - 2))
+        top = max(0, (screen_h - h) // 2)
+        left = max(0, (screen_w - w) // 2)
+        return top, left, h, w
+
+    def message_modal(self, title: str, message: str) -> None:
+        top, left, h, w = self.modal_geometry(12, 76)
+        self.draw()
+        self.draw_box(top, left, h, w, title)
+        lines = wrap_for_width(message, w - 4)
+        for idx, line in enumerate(lines[: h - 4]):
+            self.safe_addstr(top + 2 + idx, left + 2, line, w - 4)
+        self.safe_addstr(top + h - 2, left + 2, "Press any key to continue", w - 4, curses.A_REVERSE)
+        self.stdscr.refresh()
+        self.stdscr.getch()
+
+    def yes_no_modal(self, title: str, message: str, default: bool = False) -> bool:
+        top, left, h, w = self.modal_geometry(10, 72)
+        while True:
+            self.draw()
+            self.draw_box(top, left, h, w, title)
+            lines = wrap_for_width(message, w - 4)
+            for idx, line in enumerate(lines[: h - 4]):
+                self.safe_addstr(top + 2 + idx, left + 2, line, w - 4)
+            prompt = "Y/N? " + ("[default: yes]" if default else "[default: no]")
+            self.safe_addstr(top + h - 2, left + 2, prompt, w - 4, curses.A_REVERSE)
+            self.stdscr.refresh()
+            ch = self.stdscr.getch()
+            if ch in (ord("y"), ord("Y")):
+                return True
+            if ch in (ord("n"), ord("N"), 27):
+                return False
+            if ch in (10, 13, curses.KEY_ENTER):
+                return default
+
+    def text_input_modal(self, title: str, prompt: str, secret: bool = False) -> Optional[str]:
+        top, left, h, w = self.modal_geometry(11, 76)
+        value = ""
+        cursor = 0
+
+        while True:
+            self.draw()
+            self.draw_box(top, left, h, w, title)
+            for idx, line in enumerate(wrap_for_width(prompt, w - 4)[:3]):
+                self.safe_addstr(top + 2 + idx, left + 2, line, w - 4)
+
+            visible_value = "*" * len(value) if secret else value
+            field_w = w - 6
+            left_cut = max(0, len(visible_value) - field_w + 1)
+            shown = visible_value[left_cut : left_cut + field_w]
+            field_y = top + h - 4
+            self.safe_addstr(field_y, left + 2, " " * (w - 4), w - 4, curses.A_REVERSE)
+            self.safe_addstr(field_y, left + 2, shown, field_w, curses.A_REVERSE)
+            self.safe_addstr(top + h - 2, left + 2, "Enter=accept | Esc=cancel | Backspace=edit", w - 4)
+
+            try:
+                self.stdscr.move(field_y, left + 2 + min(cursor - left_cut, field_w - 1))
+            except curses.error:
+                pass
+            self.stdscr.refresh()
+
+            ch = self.stdscr.getch()
+            if ch in (10, 13, curses.KEY_ENTER):
+                return value.strip()
+            if ch == 27:
+                return None
+            if ch in (curses.KEY_BACKSPACE, 127, 8):
+                if cursor > 0:
+                    value = value[: cursor - 1] + value[cursor:]
+                    cursor -= 1
+            elif ch == curses.KEY_DC:
+                if cursor < len(value):
+                    value = value[:cursor] + value[cursor + 1 :]
+            elif ch == curses.KEY_LEFT:
+                cursor = max(0, cursor - 1)
+            elif ch == curses.KEY_RIGHT:
+                cursor = min(len(value), cursor + 1)
+            elif 32 <= ch <= 126:
+                value = value[:cursor] + chr(ch) + value[cursor:]
+                cursor += 1
+
+    # ------------------------------------------------------------------
+    # API key setup and model selector
+    # ------------------------------------------------------------------
+
+    def prompt_api_key(self, required: bool = False) -> bool:
+        title = "API Key Required" if required else "Set API Key"
+        prompt = (
+            "Paste your Gemini API key. It will be used for this session. "
+            "You can optionally save it to ~/.config/gemini-cli/config."
+        )
+        key = self.text_input_modal(title, prompt, secret=True)
+        if not key:
+            self.status = "API key not set"
+            return False
+
+        self.cfg.api_key = key
+        if self.yes_no_modal(
+            "Save API Key",
+            "Save GEMINI_API_KEY to the config file? This is convenient but stores the key in plaintext.",
+            default=False,
+        ):
+            set_config_value(self.cfg, "GEMINI_API_KEY", key)
+            self.status = "API key saved to config"
+        else:
+            self.status = "API key active for this run only"
+        return True
+
+    def ensure_api_key(self) -> bool:
+        if self.cfg.api_key:
+            return True
+        return self.prompt_api_key(required=True)
+
+    def model_selector(self) -> None:
+        if not self.ensure_api_key():
+            return
+
+        self.status = "Fetching model list..."
+        self.draw()
+        models, error = fetch_gemini_models(self.cfg)
+        if error:
+            self.message_modal("Model List Error", error)
+            self.status = "model list failed"
+            return
+        if not models:
+            self.message_modal("Model List", "No generateContent-compatible models were returned.")
+            self.status = "no models returned"
+            return
+
+        selected = self.model_menu(models)
+        if selected is None:
+            self.status = "model selection cancelled"
+            return
+
+        old_model = self.cfg.model
+        self.cfg.model = selected.model_id
+        self.transcript.append(
+            TranscriptItem("system", f"Model changed: {old_model} -> {self.cfg.model}")
+        )
+        self.status = f"model activated: {self.cfg.model}"
+
+        if self.yes_no_modal(
+            "Save Model",
+            f"Save MODEL={self.cfg.model} to the config file?",
+            default=True,
+        ):
+            set_config_value(self.cfg, "MODEL", self.cfg.model)
+            self.status = f"model activated and saved: {self.cfg.model}"
+
+    def model_menu(self, models: List[GeminiModel]) -> Optional[GeminiModel]:
+        index = 0
+        scroll = 0
+
+        while True:
+            self.draw()
+            top, left, h, w = self.modal_geometry(20, 86)
+            self.draw_box(top, left, h, w, "Model Selector")
+            self.safe_addstr(top + 1, left + 2, "Up/Down=move | Enter=activate | Esc=cancel", w - 4)
+
+            list_h = h - 5
+            if index < scroll:
+                scroll = index
+            elif index >= scroll + list_h:
+                scroll = index - list_h + 1
+
+            visible = models[scroll : scroll + list_h]
+            for offset, model in enumerate(visible):
+                row = top + 3 + offset
+                marker = "*" if model.model_id == self.cfg.model else " "
+                line = f"{marker} {model.model_id}"
+                attr = curses.A_REVERSE if scroll + offset == index else 0
+                self.safe_addstr(row, left + 2, line, w - 4, attr)
+
+            footer = f"{index + 1}/{len(models)}"
+            self.safe_addstr(top + h - 2, left + 2, footer, w - 4)
+            self.stdscr.refresh()
+
+            ch = self.stdscr.getch()
+            if ch in (27, ord("q"), ord("Q")):
+                return None
+            if ch in (10, 13, curses.KEY_ENTER):
+                return models[index]
+            if ch == curses.KEY_UP:
+                index = max(0, index - 1)
+            elif ch == curses.KEY_DOWN:
+                index = min(len(models) - 1, index + 1)
+            elif ch == curses.KEY_PPAGE:
+                index = max(0, index - list_h)
+            elif ch == curses.KEY_NPAGE:
+                index = min(len(models) - 1, index + list_h)
+            elif ch == curses.KEY_HOME:
+                index = 0
+            elif ch == curses.KEY_END:
+                index = len(models) - 1
+
+    # ------------------------------------------------------------------
+    # Curses drawing
+    # ------------------------------------------------------------------
 
     def transcript_display_lines(self, width: int) -> List[str]:
         lines: List[str] = []
@@ -489,51 +819,68 @@ class GeminiCursesApp:
             if offset < len(visible):
                 self.safe_addstr(y, 0, visible[offset], width)
 
-    def visible_input_lines(self, width: int, height: int) -> Tuple[List[str], int, int]:
-        # This first release uses horizontal scrolling for long logical input
-        # lines instead of visual wrapping. That prevents the old Bash problem
-        # where backspace gets confused at the left edge of a wrapped line.
-        self.input_scroll = max(0, min(self.input_scroll, max(0, len(self.input_lines) - height)))
+    def input_segments(self, width: int) -> Tuple[List[Tuple[int, int, str]], int]:
+        # Visual wrapping is handled by curses, not by the terminal emulator.
+        # This avoids the old Bash problem where the cursor appeared stuck at
+        # the left edge of a wrapped line.
+        available = max(1, width - 2)
+        segments: List[Tuple[int, int, str]] = []
+        cursor_segment = 0
 
-        if self.cursor_row < self.input_scroll:
-            self.input_scroll = self.cursor_row
-        elif self.cursor_row >= self.input_scroll + height:
-            self.input_scroll = self.cursor_row - height + 1
+        for logical_row, line in enumerate(self.input_lines):
+            if not line:
+                start_index = len(segments)
+                segments.append((logical_row, 0, ""))
+                if logical_row == self.cursor_row:
+                    cursor_segment = start_index
+                continue
 
-        visible = []
-        cursor_screen_y = self.cursor_row - self.input_scroll
-        cursor_screen_x = 0
+            starts = list(range(0, len(line), available))
+            if logical_row == self.cursor_row and self.cursor_col == len(line) and len(line) % available == 0:
+                starts.append(len(line))
 
-        for logical_row in range(self.input_scroll, min(len(self.input_lines), self.input_scroll + height)):
-            line = self.input_lines[logical_row]
-            if logical_row == self.cursor_row:
-                left = max(0, self.cursor_col - max(1, width - 2))
-                cursor_screen_x = self.cursor_col - left
-            else:
-                left = 0
-            marker = "> " if logical_row == 0 else "  "
-            available = max(1, width - len(marker))
-            shown = line[left : left + available]
-            visible.append(marker + shown)
-            if logical_row == self.cursor_row:
-                cursor_screen_x += len(marker)
+            for start in starts:
+                chunk = line[start : start + available]
+                segment_index = len(segments)
+                segments.append((logical_row, start, chunk))
+                if logical_row == self.cursor_row:
+                    if start <= self.cursor_col <= start + len(chunk):
+                        cursor_segment = segment_index
 
-        return visible, cursor_screen_y, cursor_screen_x
+        return segments, cursor_segment
 
     def draw_input(self, label_y: int, input_y: int, width: int) -> None:
-        label = "INPUT: Enter=newline | Ctrl+G/F5=send | F10/Ctrl+Q=quit"
+        label = "INPUT: Enter=newline | Ctrl+G/F5=send | F2=models | F3=API key | F10/Ctrl+Q=quit"
         self.safe_addstr(label_y, 0, "_" * width, width)
         self.safe_addstr(label_y, 0, label, width)
 
-        visible, cur_y, cur_x = self.visible_input_lines(width, self.INPUT_HEIGHT)
+        segments, cursor_segment = self.input_segments(width)
+        if cursor_segment < self.input_visual_scroll:
+            self.input_visual_scroll = cursor_segment
+        elif cursor_segment >= self.input_visual_scroll + self.INPUT_HEIGHT:
+            self.input_visual_scroll = cursor_segment - self.INPUT_HEIGHT + 1
+
+        self.input_visual_scroll = max(0, min(self.input_visual_scroll, max(0, len(segments) - self.INPUT_HEIGHT)))
+        visible = segments[self.input_visual_scroll : self.input_visual_scroll + self.INPUT_HEIGHT]
+
+        cursor_y = 0
+        cursor_x = 2
+
         for offset in range(self.INPUT_HEIGHT):
             y = input_y + offset
-            text = visible[offset] if offset < len(visible) else ""
-            self.safe_addstr(y, 0, text, width)
+            if offset >= len(visible):
+                continue
+            logical_row, start, chunk = visible[offset]
+            marker = "> " if logical_row == 0 and start == 0 else "  "
+            self.safe_addstr(y, 0, marker + chunk, width)
+            absolute_index = self.input_visual_scroll + offset
+            if absolute_index == cursor_segment:
+                cursor_y = offset
+                cursor_x = 2 + max(0, self.cursor_col - start)
 
         try:
             curses.curs_set(1)
-            self.stdscr.move(input_y + cur_y, min(cur_x, width - 2))
+            self.stdscr.move(input_y + cursor_y, min(cursor_x, width - 2))
         except curses.error:
             pass
 
@@ -566,9 +913,9 @@ class GeminiCursesApp:
         self.draw_status(status_y, width)
         self.stdscr.refresh()
 
-    # ---------------------------------------------------------------------
+    # ------------------------------------------------------------------
     # Input editing
-    # ---------------------------------------------------------------------
+    # ------------------------------------------------------------------
 
     def insert_text(self, text: str) -> None:
         line = self.input_lines[self.cursor_row]
@@ -633,16 +980,19 @@ class GeminiCursesApp:
         self.input_lines = [""]
         self.cursor_row = 0
         self.cursor_col = 0
-        self.input_scroll = 0
+        self.input_visual_scroll = 0
 
     def current_input(self) -> str:
         return "\n".join(self.input_lines).strip("\n")
 
-    # ---------------------------------------------------------------------
+    # ------------------------------------------------------------------
     # Sending messages
-    # ---------------------------------------------------------------------
+    # ------------------------------------------------------------------
 
     def send_current_message(self) -> None:
+        if not self.ensure_api_key():
+            return
+
         message = self.current_input()
         if not message.strip():
             self.status = "empty message ignored"
@@ -674,13 +1024,21 @@ class GeminiCursesApp:
         self.status = "response complete"
         self.transcript_scroll = 0
 
-    # ---------------------------------------------------------------------
+    # ------------------------------------------------------------------
     # Main event loop
-    # ---------------------------------------------------------------------
+    # ------------------------------------------------------------------
 
     def handle_key(self, ch: int) -> None:
         if ch in (curses.KEY_F10, 17):  # F10 or Ctrl+Q
             self.should_quit = True
+            return
+
+        if ch == curses.KEY_F2:
+            self.model_selector()
+            return
+
+        if ch == curses.KEY_F3:
+            self.prompt_api_key(required=False)
             return
 
         if ch in (curses.KEY_F5, 7):  # F5 or Ctrl+G
@@ -711,9 +1069,9 @@ class GeminiCursesApp:
             self.transcript_scroll = max(0, self.transcript_scroll - 10)
         elif ch == 21:  # Ctrl+U clears current input
             self.clear_input()
-        elif ch == 12:  # Ctrl+L redraw
+        elif ch == 12:  # Ctrl+L redraws on next loop
             pass
-        elif ch == 9:  # tab
+        elif ch == 9:  # Tab inserts four spaces
             self.insert_text("    ")
         elif 32 <= ch <= 126:
             self.insert_text(chr(ch))
@@ -725,6 +1083,11 @@ class GeminiCursesApp:
         stdscr.keypad(True)
 
         self.load_memory_from_session()
+
+        if not self.cfg.api_key:
+            self.draw()
+            if not self.prompt_api_key(required=True):
+                self.should_quit = True
 
         while not self.should_quit:
             self.draw()
@@ -757,6 +1120,19 @@ def main() -> int:
         list_sessions(session_dir)
         return 0
 
+    if args.models:
+        if not cfg.api_key:
+            print("ERROR: GEMINI_API_KEY not set", file=sys.stderr)
+            print("Set it in the environment or ~/.config/gemini-cli/config", file=sys.stderr)
+            return 1
+        models, error = fetch_gemini_models(cfg)
+        if error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 1
+        for model in models:
+            print(model.model_id)
+        return 0
+
     if args.resume and args.session_name:
         print("error: use either a session name or --resume, not both", file=sys.stderr)
         return 2
@@ -773,11 +1149,6 @@ def main() -> int:
     else:
         session_name = default_session_name()
         session_path = session_dir / f"{session_name}.log"
-
-    if not cfg.api_key:
-        print("ERROR: GEMINI_API_KEY not set", file=sys.stderr)
-        print("Set it in the environment or ~/.config/gemini-cli/config", file=sys.stderr)
-        return 1
 
     app = GeminiCursesApp(cfg, session_name, session_path)
 
