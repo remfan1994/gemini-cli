@@ -22,14 +22,16 @@ DESCRIPTION
     gemini-cli is a lightweight Bash-based terminal chat interface for
     the Google Gemini API.
 
-    It is the minimal, line-oriented edition of the gemini-cli project.
-    It is intended to remain scriptable, readable, and dependency-light.
+    It is the minimal, line-oriented edition of the gemini-terminal-tools
+    project. It is intended to remain scriptable, readable, and
+    dependency-light.
 
     It provides:
         - persistent chat sessions
         - named and resumable conversations
         - timestamped logs
-        - rolling memory context
+        - rolling conversation context
+        - resume-time context rebuild from session logs
         - config file support
         - automatic code attachment extraction
         - model listing
@@ -76,11 +78,15 @@ SESSION MANAGEMENT
         Start a new timestamped session.
 
     gemini-cli <name>
-        Start or open a named session.
+        Start or open a named session. If the named log already exists,
+        gemini-cli rebuilds recent conversation context from it.
 
     gemini-cli --resume <name>
         Resume an existing named session. If the session does not exist,
         the command exits with an error.
+
+        On resume, gemini-cli rebuilds recent conversation context from
+        the session log so follow-up questions can refer to earlier messages.
 
     gemini-cli --list
         List saved sessions.
@@ -115,9 +121,17 @@ MODEL AUTOSCAN
 
         1. Fetch the live Gemini model list.
         2. Filter to models that support generateContent.
-        3. Test each candidate with a minimal prompt:
-               Reply with OK.
-        4. Print the first model that returns valid text.
+        3. Test each candidate with the autoscan challenge.
+        4. Print the first model that returns text containing the expected
+           answer substring.
+
+    Default autoscan challenge:
+
+        Prompt:
+            What is the capital of Texas?
+
+        Expected substring:
+            austin
 
     Autoscan does not guarantee the best model. It only finds a functional
     text-generation model available to the current API key.
@@ -188,9 +202,15 @@ CONFIGURATION
         MODEL
             Gemini model identifier.
 
-        HISTORY_LIMIT
-            Number of recent conversation entries retained in memory.
+        CONTEXT_TURNS
+            Number of recent user/assistant exchanges sent back to Gemini as
+            conversation context.
+
             Default: 12
+
+        HISTORY_LIMIT
+            Legacy alias for CONTEXT_TURNS. Kept for compatibility with older
+            config files.
 
         GEMINI_API_KEY
             Optional API key. Environment variable takes priority.
@@ -202,6 +222,14 @@ CONFIGURATION
         ATTACHMENT_DIR
             Directory used for extracted code artifacts.
             Default: SESSION_DIR/attachments
+
+        AUTOSCAN_PROMPT
+            Prompt used when testing candidate models during autoscan.
+            Default: What is the capital of Texas?
+
+        AUTOSCAN_EXPECTED
+            Case-insensitive substring required in the autoscan response.
+            Default: austin
 
 ENVIRONMENT
     GEMINI_API_KEY
@@ -246,8 +274,14 @@ SESSION NAMES
 MEMORY MODEL
     gemini-cli keeps a rolling conversation context in memory.
 
-    The Bash version does not replay full logs into context. It keeps recent
-    messages only, as controlled by HISTORY_LIMIT.
+    CONTEXT_TURNS controls how many recent user/assistant exchanges are sent
+    back to Gemini with each request.
+
+    When resuming an existing session, the Bash version now rebuilds recent
+    context from the session log.
+
+    The session log remains the permanent archive. The context buffer is only
+    the recent window sent back to Gemini.
 
 LIMITATIONS
     - Requires Bash
@@ -256,11 +290,12 @@ LIMITATIONS
     - Requires internet access
     - API quota restrictions apply
     - Autoscan may consume multiple API calls
+    - Autoscan only verifies the configured challenge, not overall model quality
     - Basic terminal input only; no ncurses-style editing
     - Ctrl+D is used to send multiline input
 
 VERSION
-    gemini-cli version 2.3
+    gemini-cli version 2.4
 
 AUTHOR
-    Part of the gemini-cli terminal AI workspace project.
+    Part of the gemini-terminal-tools project
