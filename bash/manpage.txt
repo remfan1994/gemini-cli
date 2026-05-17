@@ -1,68 +1,152 @@
 GEMINI-CLI(1)              User Commands              GEMINI-CLI(1)
 
 NAME
-    gemini-cli - terminal-based Gemini chat interface
+    gemini-cli - Bash terminal interface for the Gemini API
 
 SYNOPSIS
     gemini-cli
     gemini-cli <session_name>
     gemini-cli --resume <session_name>
     gemini-cli --list
+    gemini-cli --models
+    gemini-cli --autoscan-model
+    gemini-cli --autoscan-model --save
+    gemini-cli --select-model
+    gemini-cli --select-model --save
+    gemini-cli --set-api-key
     gemini-cli --version
     gemini-cli --help
     gemini-cli -h
 
 DESCRIPTION
-    gemini-cli is a lightweight terminal chat interface
-    for the Google Gemini API.
+    gemini-cli is a lightweight Bash-based terminal chat interface for
+    the Google Gemini API.
 
-    The tool is designed for:
-        - minimal dependencies
-        - persistent local sessions
-        - readable terminal interaction
-        - artifact-oriented workflows
+    It is the minimal, line-oriented edition of the gemini-cli project.
+    It is intended to remain scriptable, readable, and dependency-light.
 
-FEATURES
-    - Persistent chat sessions
-    - Named/resumable conversations
-    - Timestamped logs
-    - Configurable model selection
-    - Lightweight rolling memory
-    - Automatic code attachment extraction
-    - Configurable storage directories
-
-HELP SYSTEM
-    Built-in usage help is available directly from the
-    command line via:
-
-        gemini-cli --help
-        gemini-cli -h
+    It provides:
+        - persistent chat sessions
+        - named and resumable conversations
+        - timestamped logs
+        - rolling memory context
+        - config file support
+        - automatic code attachment extraction
+        - model listing
+        - model autoscan
+        - numbered model selection
+        - API-key setup helper
 
 SESSION MANAGEMENT
     gemini-cli
-        Start new timestamped session.
+        Start a new timestamped session.
 
     gemini-cli <name>
-        Start/create named session.
+        Start or open a named session.
 
     gemini-cli --resume <name>
-        Resume named session.
+        Resume an existing named session. If the session does not exist,
+        the command exits with an error.
 
     gemini-cli --list
         List saved sessions.
 
-    gemini-cli --version
-        Display version information.
+INPUT
+    The Bash version uses a multiline Ctrl+D send workflow.
 
-    gemini-cli --help
-    gemini-cli -h
-        Display built-in help summary.
+    Type or paste input, then press Ctrl+D to submit it.
+
+    Ctrl+C exits the running chat.
+
+MODEL DISCOVERY
+    Available Gemini models can be listed with:
+
+        gemini-cli --models
+
+    They can also be listed directly with curl:
+
+        curl "https://generativelanguage.googleapis.com/v1beta/models?key=YOUR_API_KEY"
+
+    gemini-cli filters the returned list to models that report
+    generateContent support.
+
+MODEL AUTOSCAN
+    Autoscan is intended for users who do not know which model to choose.
+
+    From the shell:
+
+        gemini-cli --autoscan-model
+
+    Autoscan performs the following steps:
+
+        1. Fetch the live Gemini model list.
+        2. Filter to models that support generateContent.
+        3. Test each candidate with a minimal prompt:
+               Reply with OK.
+        4. Print the first model that returns valid text.
+
+    Autoscan does not guarantee the best model. It only finds a functional
+    text-generation model available to the current API key.
+
+    Autoscan may consume multiple API calls.
+
+    To save the result:
+
+        gemini-cli --autoscan-model --save
+
+MODEL SELECTION
+    A numbered model selection menu is available:
+
+        gemini-cli --select-model
+
+    The tool prints available generateContent models, asks the user to choose
+    a number, then offers to save the chosen MODEL value to the config file.
+
+    To save without a second confirmation prompt:
+
+        gemini-cli --select-model --save
+
+MODEL FALLBACK
+    If MODEL is not configured, gemini-cli uses:
+
+        gemini-2.5-flash
+
+    as a fallback model.
+
+    This is not a permanent recommendation and not a guarantee that the model
+    will always be available. Users should prefer:
+
+        gemini-cli --autoscan-model --save
+
+    or:
+
+        gemini-cli --select-model
+
+    to choose a currently available model.
+
+API KEY SETUP
+    API key may be supplied by environment variable:
+
+        export GEMINI_API_KEY=your_key
+
+    It may also be placed in the config file:
+
+        GEMINI_API_KEY=your_key
+
+    gemini-cli can prompt for and save the key:
+
+        gemini-cli --set-api-key
+
+    Saving the API key stores it in plaintext. The script attempts to chmod
+    the config file to 0600.
 
 CONFIGURATION
-    Config file:
+    Configuration file:
+
         ~/.config/gemini-cli/config
 
     Format:
+
         KEY=VALUE
 
     Supported keys:
@@ -71,60 +155,78 @@ CONFIGURATION
             Gemini model identifier.
 
         HISTORY_LIMIT
-            Rolling context window size.
+            Number of recent conversation entries retained in memory.
+            Default: 12
 
         GEMINI_API_KEY
-            Optional API key.
+            Optional API key. Environment variable takes priority.
 
         SESSION_DIR
             Directory used for session log storage.
+            Default: ~/.gpt
 
         ATTACHMENT_DIR
             Directory used for extracted code artifacts.
+            Default: SESSION_DIR/attachments
 
 ENVIRONMENT
     GEMINI_API_KEY
         Preferred API key source.
 
-        Environment variables override config values.
-
-ATTACHMENT SYSTEM
-    Code blocks returned by Gemini are automatically
-    extracted into files under ATTACHMENT_DIR.
-
-    Supported attachment types include:
-
-        bash/sh      -> .sh
-        python       -> .py
-        json         -> .json
-        yaml/yml     -> .yml
-        javascript   -> .js
-        html         -> .html
-        css          -> .css
-        sql          -> .sql
-        unknown      -> .txt
-
-    Terminal output replaces code blocks with:
-
-        [attachment saved]
+        Precedence:
+            1. Environment variable
+            2. Config file
 
 FILES
-    SESSION_DIR
-        Session logs
-
-    ATTACHMENT_DIR
-        Extracted code artifacts
-
     ~/.config/gemini-cli/config
-        User configuration file
+        Configuration file.
+
+    SESSION_DIR/*.log
+        Session log files.
+
+    ATTACHMENT_DIR/
+        Extracted code block attachments.
+
+ATTACHMENT SYSTEM
+    Markdown fenced code blocks returned by Gemini are extracted from
+    terminal display and saved into ATTACHMENT_DIR.
+
+    The original raw Gemini response remains preserved in the session log.
+
+    File names follow this pattern:
+
+        <session>-<type>-NN.<extension>
+
+    Examples:
+
+        android-backup-python-01.py
+        linux-help-bash-02.sh
+        notes-json-01.json
+
+SESSION NAMES
+    Session names are sanitized for filesystem safety.
+
+    Characters outside letters, numbers, dot, dash, and underscore are
+    converted to underscores.
 
 MEMORY MODEL
-    Maintains lightweight rolling conversation context.
+    gemini-cli keeps a rolling conversation context in memory.
+
+    The Bash version does not replay full logs into context. It keeps recent
+    messages only, as controlled by HISTORY_LIMIT.
 
 LIMITATIONS
+    - Requires Bash
+    - Requires curl
+    - Requires python3
     - Requires internet access
-    - No readline integration
     - API quota restrictions apply
+    - Autoscan may consume multiple API calls
+    - Basic terminal input only; no ncurses-style editing
+    - Ctrl+D is used to send multiline input
+
+VERSION
+    gemini-cli version 2.3
 
 AUTHOR
-    Generated as a lightweight terminal AI workspace tool
+    Part of the gemini-cli terminal AI workspace project.
