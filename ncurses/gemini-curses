@@ -1,0 +1,793 @@
+#!/usr/bin/env python3
+"""
+gemini-curses
+
+A first ncurses-based Gemini terminal interface.
+
+This version keeps the project philosophy of the Bash edition while moving
+the interactive user interface into curses. The main purpose is to fix the
+line-editing and terminal-redraw problems that are difficult to solve cleanly
+in Bash.
+"""
+
+from __future__ import annotations
+
+import argparse
+import curses
+import json
+import os
+import re
+import sys
+import textwrap
+import urllib.error
+import urllib.request
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+from typing import List, Optional, Tuple
+
+VERSION = "0.1.0"
+PROGRAM = "gemini-curses"
+
+
+# ---------------------------------------------------------------------------
+# Configuration model
+# ---------------------------------------------------------------------------
+# The ncurses edition intentionally uses the same config keys as the Bash
+# edition so users can move between the two interfaces without maintaining two
+# separate configuration systems.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class Config:
+    model: str = "gemini-2.5-flash"
+    history_limit: int = 12
+    api_key: str = ""
+    session_dir: Path = field(default_factory=lambda: Path.home() / ".gpt")
+    attachment_dir: Optional[Path] = None
+
+    @property
+    def effective_attachment_dir(self) -> Path:
+        if self.attachment_dir is not None:
+            return self.attachment_dir
+        return self.session_dir / "attachments"
+
+
+def expand_path(value: str) -> Path:
+    """Expand ~ and environment variables in a user-supplied path."""
+    return Path(os.path.expandvars(os.path.expanduser(value))).resolve()
+
+
+def load_config() -> Config:
+    """Load ~/.config/gemini-cli/config using simple KEY=VALUE parsing."""
+    cfg = Config()
+    config_file = Path.home() / ".config" / "gemini-cli" / "config"
+
+    env_api_key = os.environ.get("GEMINI_API_KEY", "")
+
+    if config_file.exists():
+        with config_file.open("r", encoding="utf-8") as fh:
+            for raw_line in fh:
+                line = raw_line.strip()
+
+                # Empty lines and comment lines are ignored. This keeps the
+                # config file friendly to humans without adding a full parser.
+                if not line or line.startswith("#"):
+                    continue
+
+                if "=" not in line:
+                    continue
+
+                key, value = line.split("=", 1)
+                key = key.strip()
+                value = value.strip()
+
+                if key == "MODEL":
+                    cfg.model = value
+                elif key == "HISTORY_LIMIT":
+                    try:
+                        cfg.history_limit = max(1, int(value))
+                    except ValueError:
+                        cfg.history_limit = 12
+                elif key == "GEMINI_API_KEY":
+                    # The environment variable wins. Config-file API keys are
+                    # convenient, but environment variables are safer.
+                    cfg.api_key = env_api_key or value
+                elif key == "SESSION_DIR":
+                    cfg.session_dir = expand_path(value)
+                elif key == "ATTACHMENT_DIR":
+                    cfg.attachment_dir = expand_path(value)
+
+    if env_api_key:
+        cfg.api_key = env_api_key
+
+    return cfg
+
+
+# ---------------------------------------------------------------------------
+# Command-line parsing
+# ---------------------------------------------------------------------------
+# The interface mirrors the Bash version:
+#   gemini-curses
+#   gemini-curses name
+#   gemini-curses --resume name
+#   gemini-curses --list
+#   gemini-curses --version
+# ---------------------------------------------------------------------------
+
+
+def parse_args() -> argparse.Namespace:
+    if len(sys.argv) == 2 and sys.argv[1] == "help":
+        sys.argv[1] = "--help"
+
+    parser = argparse.ArgumentParser(
+        prog=PROGRAM,
+        description="ncurses Gemini terminal interface",
+    )
+    parser.add_argument(
+        "session_name",
+        nargs="?",
+        help="named session to create or open",
+    )
+    parser.add_argument(
+        "--resume",
+        metavar="NAME",
+        help="resume an existing named session",
+    )
+    parser.add_argument(
+        "--list",
+        action="store_true",
+        help="list saved sessions",
+    )
+    parser.add_argument(
+        "--version",
+        action="store_true",
+        help="show version information",
+    )
+    return parser.parse_args()
+
+
+def sanitize_session_name(name: str) -> str:
+    """Convert a human session name into a safe filename stem."""
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", name.strip())
+    cleaned = cleaned.strip("._-")
+    return cleaned or "session"
+
+
+def default_session_name() -> str:
+    return "session-" + datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+
+
+def list_sessions(session_dir: Path) -> None:
+    session_dir.mkdir(parents=True, exist_ok=True)
+    for path in sorted(session_dir.glob("*.log")):
+        print(path.stem)
+
+
+# ---------------------------------------------------------------------------
+# Gemini API transport
+# ---------------------------------------------------------------------------
+# This uses urllib from the Python standard library instead of requests. That
+# keeps the ncurses version dependency-light while still giving reliable JSON
+# request construction. This also fixes many shell-escaping problems from the
+# Bash implementation because json.dumps handles quotes, slashes, and newlines.
+# ---------------------------------------------------------------------------
+
+
+def call_gemini(cfg: Config, prompt_text: str) -> str:
+    url = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{cfg.model}:generateContent?key={cfg.api_key}"
+    )
+
+    payload = {
+        "contents": [
+            {
+                "parts": [
+                    {
+                        "text": prompt_text,
+                    }
+                ]
+            }
+        ]
+    }
+
+    data = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            body = response.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        return f"(Gemini HTTP error {exc.code}: {body[:1000]})"
+    except urllib.error.URLError as exc:
+        return f"(Gemini network error: {exc})"
+    except Exception as exc:
+        return f"(Gemini request error: {exc})"
+
+    try:
+        parsed = json.loads(body)
+        return parsed["candidates"][0]["content"]["parts"][0]["text"]
+    except Exception as exc:
+        return f"(Gemini response parse error: {exc}; raw response: {body[:1000]})"
+
+
+# ---------------------------------------------------------------------------
+# Session log parsing and writing
+# ---------------------------------------------------------------------------
+# Logs remain plain text. The TUI can rebuild a small memory window from an
+# existing session log, but it does not need a database or binary state file.
+# ---------------------------------------------------------------------------
+
+
+ENTRY_RE = re.compile(r"^\[(\d{2}:\d{2}:\d{2})\] ([^:]+): (.*)$")
+
+
+@dataclass
+class LogEntry:
+    speaker: str
+    text: str
+
+
+def append_log(path: Path, speaker: str, text: str, timestamp: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(f"[{timestamp}] {speaker}: {text}\n")
+
+
+def load_log_entries(path: Path) -> List[LogEntry]:
+    if not path.exists():
+        return []
+
+    entries: List[LogEntry] = []
+    current_speaker: Optional[str] = None
+    current_lines: List[str] = []
+
+    with path.open("r", encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            line = line.rstrip("\n")
+            match = ENTRY_RE.match(line)
+            if match:
+                if current_speaker is not None:
+                    entries.append(LogEntry(current_speaker, "\n".join(current_lines)))
+                current_speaker = match.group(2)
+                current_lines = [match.group(3)]
+            else:
+                if current_speaker is not None:
+                    current_lines.append(line)
+
+    if current_speaker is not None:
+        entries.append(LogEntry(current_speaker, "\n".join(current_lines)))
+
+    return entries
+
+
+# ---------------------------------------------------------------------------
+# Attachment extraction
+# ---------------------------------------------------------------------------
+# Fenced markdown code blocks are saved to files and replaced in the transcript
+# display with attachment notices. The raw Gemini response is still written to
+# the log before extraction, so logs remain authoritative.
+# ---------------------------------------------------------------------------
+
+
+EXT_MAP = {
+    "bash": ".sh",
+    "sh": ".sh",
+    "shell": ".sh",
+    "python": ".py",
+    "py": ".py",
+    "json": ".json",
+    "yaml": ".yml",
+    "yml": ".yml",
+    "javascript": ".js",
+    "js": ".js",
+    "html": ".html",
+    "css": ".css",
+    "sql": ".sql",
+    "c": ".c",
+    "cpp": ".cpp",
+    "c++": ".cpp",
+    "text": ".txt",
+}
+
+FENCE_RE = re.compile(r"```([A-Za-z0-9_+.#-]*)[ \t]*\n(.*?)```", re.DOTALL)
+
+
+def safe_attachment_tag(lang: str) -> str:
+    lang = lang.strip().lower() or "text"
+    lang = lang.replace("+", "p").replace("#", "sharp")
+    lang = re.sub(r"[^A-Za-z0-9._-]+", "_", lang)
+    return lang or "text"
+
+
+def next_attachment_number(attachment_dir: Path, session_name: str, lang: str, ext: str) -> int:
+    pattern = re.compile(
+        rf"^{re.escape(session_name)}-{re.escape(lang)}-(\d{{2,}}){re.escape(ext)}$"
+    )
+    highest = 0
+    for path in attachment_dir.glob(f"{session_name}-{lang}-*{ext}"):
+        match = pattern.match(path.name)
+        if match:
+            highest = max(highest, int(match.group(1)))
+    return highest + 1
+
+
+def extract_attachments(text: str, attachment_dir: Path, session_name: str) -> str:
+    attachment_dir.mkdir(parents=True, exist_ok=True)
+
+    def replacement(match: re.Match[str]) -> str:
+        raw_lang = match.group(1).strip().lower() or "text"
+        lang = safe_attachment_tag(raw_lang)
+        content = match.group(2)
+        ext = EXT_MAP.get(raw_lang, EXT_MAP.get(lang, ".txt"))
+        number = next_attachment_number(attachment_dir, session_name, lang, ext)
+        filename = f"{session_name}-{lang}-{number:02d}{ext}"
+        path = attachment_dir / filename
+
+        with path.open("w", encoding="utf-8") as fh:
+            fh.write(content)
+
+        return (
+            "\n"
+            "[attachment saved]\n"
+            f"file: {filename}\n"
+            f"location: {attachment_dir}\n"
+        )
+
+    return FENCE_RE.sub(replacement, text)
+
+
+# ---------------------------------------------------------------------------
+# Text wrapping helpers
+# ---------------------------------------------------------------------------
+# Curses requires careful bounds handling. These helpers prevent addstr calls
+# from writing past the right edge of the terminal and causing curses.error.
+# ---------------------------------------------------------------------------
+
+
+def wrap_for_width(text: str, width: int) -> List[str]:
+    width = max(1, width)
+    result: List[str] = []
+    for paragraph in text.splitlines() or [""]:
+        if paragraph == "":
+            result.append("")
+        else:
+            result.extend(
+                textwrap.wrap(
+                    paragraph,
+                    width=width,
+                    replace_whitespace=False,
+                    drop_whitespace=False,
+                    break_long_words=True,
+                    break_on_hyphens=False,
+                )
+            )
+    return result or [""]
+
+
+def now_time() -> str:
+    return datetime.now().strftime("%H:%M:%S")
+
+
+# ---------------------------------------------------------------------------
+# Curses application
+# ---------------------------------------------------------------------------
+# This is intentionally a first usable TUI rather than a perfect terminal app.
+# It fixes the largest Bash problems: redraws, cursor control, multi-line input,
+# scrolling, and JSON escaping.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class TranscriptItem:
+    speaker: str
+    text: str
+    timestamp: str = field(default_factory=now_time)
+
+
+class GeminiCursesApp:
+    INPUT_HEIGHT = 5
+
+    def __init__(self, cfg: Config, session_name: str, session_path: Path):
+        self.cfg = cfg
+        self.session_name = session_name
+        self.session_path = session_path
+        self.attachment_dir = cfg.effective_attachment_dir
+        self.username = os.environ.get("USER") or os.environ.get("LOGNAME") or "user"
+
+        self.history: List[str] = []
+        self.transcript: List[TranscriptItem] = []
+        self.transcript_scroll = 0
+
+        self.input_lines: List[str] = [""]
+        self.cursor_row = 0
+        self.cursor_col = 0
+        self.input_scroll = 0
+
+        self.status = "Enter=newline | Ctrl+G/F5=send | F10/Ctrl+Q=quit | PgUp/PgDn=scroll"
+        self.should_quit = False
+
+    # ---------------------------------------------------------------------
+    # Memory model
+    # ---------------------------------------------------------------------
+
+    def load_memory_from_session(self) -> None:
+        entries = load_log_entries(self.session_path)
+        if not entries:
+            return
+
+        for entry in entries[-self.cfg.history_limit :]:
+            if entry.speaker == "Gemini":
+                self.history.append("Assistant: " + entry.text)
+            else:
+                self.history.append("User: " + entry.text)
+
+        self.trim_history()
+        self.transcript.append(
+            TranscriptItem(
+                "system",
+                f"Loaded memory from existing session: {self.session_name}",
+            )
+        )
+
+    def trim_history(self) -> None:
+        if len(self.history) > self.cfg.history_limit:
+            self.history = self.history[-self.cfg.history_limit :]
+
+    def build_context(self) -> str:
+        return "\n".join(self.history)
+
+    # ---------------------------------------------------------------------
+    # Curses drawing
+    # ---------------------------------------------------------------------
+
+    def safe_addstr(self, y: int, x: int, text: str, max_width: Optional[int] = None) -> None:
+        height, width = self.stdscr.getmaxyx()
+        if y < 0 or y >= height or x < 0 or x >= width:
+            return
+        limit = width - x
+        if max_width is not None:
+            limit = min(limit, max_width)
+        if limit <= 0:
+            return
+        try:
+            self.stdscr.addstr(y, x, text[: max(0, limit - 1)])
+        except curses.error:
+            pass
+
+    def transcript_display_lines(self, width: int) -> List[str]:
+        lines: List[str] = []
+        for item in self.transcript:
+            prefix = f"[{item.timestamp}] {item.speaker}: "
+            wrapped = wrap_for_width(prefix + item.text, width)
+            lines.extend(wrapped)
+            lines.append("")
+        return lines
+
+    def draw_header(self, width: int) -> None:
+        header = f"{PROGRAM} | session: {self.session_name} | model: {self.cfg.model}"
+        self.safe_addstr(0, 0, header, width)
+        self.safe_addstr(1, 0, "_" * width, width)
+
+    def draw_transcript(self, start_y: int, height: int, width: int) -> None:
+        lines = self.transcript_display_lines(width)
+        max_scroll = max(0, len(lines) - height)
+        self.transcript_scroll = min(self.transcript_scroll, max_scroll)
+        start = max(0, len(lines) - height - self.transcript_scroll)
+        visible = lines[start : start + height]
+
+        for offset in range(height):
+            y = start_y + offset
+            if offset < len(visible):
+                self.safe_addstr(y, 0, visible[offset], width)
+
+    def visible_input_lines(self, width: int, height: int) -> Tuple[List[str], int, int]:
+        # This first release uses horizontal scrolling for long logical input
+        # lines instead of visual wrapping. That prevents the old Bash problem
+        # where backspace gets confused at the left edge of a wrapped line.
+        self.input_scroll = max(0, min(self.input_scroll, max(0, len(self.input_lines) - height)))
+
+        if self.cursor_row < self.input_scroll:
+            self.input_scroll = self.cursor_row
+        elif self.cursor_row >= self.input_scroll + height:
+            self.input_scroll = self.cursor_row - height + 1
+
+        visible = []
+        cursor_screen_y = self.cursor_row - self.input_scroll
+        cursor_screen_x = 0
+
+        for logical_row in range(self.input_scroll, min(len(self.input_lines), self.input_scroll + height)):
+            line = self.input_lines[logical_row]
+            if logical_row == self.cursor_row:
+                left = max(0, self.cursor_col - max(1, width - 2))
+                cursor_screen_x = self.cursor_col - left
+            else:
+                left = 0
+            marker = "> " if logical_row == 0 else "  "
+            available = max(1, width - len(marker))
+            shown = line[left : left + available]
+            visible.append(marker + shown)
+            if logical_row == self.cursor_row:
+                cursor_screen_x += len(marker)
+
+        return visible, cursor_screen_y, cursor_screen_x
+
+    def draw_input(self, label_y: int, input_y: int, width: int) -> None:
+        label = "INPUT: Enter=newline | Ctrl+G/F5=send | F10/Ctrl+Q=quit"
+        self.safe_addstr(label_y, 0, "_" * width, width)
+        self.safe_addstr(label_y, 0, label, width)
+
+        visible, cur_y, cur_x = self.visible_input_lines(width, self.INPUT_HEIGHT)
+        for offset in range(self.INPUT_HEIGHT):
+            y = input_y + offset
+            text = visible[offset] if offset < len(visible) else ""
+            self.safe_addstr(y, 0, text, width)
+
+        try:
+            curses.curs_set(1)
+            self.stdscr.move(input_y + cur_y, min(cur_x, width - 2))
+        except curses.error:
+            pass
+
+    def draw_status(self, y: int, width: int) -> None:
+        self.safe_addstr(y, 0, "_" * width, width)
+        self.safe_addstr(y, 0, self.status, width)
+
+    def draw(self) -> None:
+        self.stdscr.erase()
+        height, width = self.stdscr.getmaxyx()
+
+        min_height = self.INPUT_HEIGHT + 6
+        if height < min_height or width < 40:
+            self.safe_addstr(0, 0, "terminal too small", width)
+            self.stdscr.refresh()
+            return
+
+        header_h = 2
+        status_h = 1
+        input_label_h = 1
+        transcript_h = height - header_h - input_label_h - self.INPUT_HEIGHT - status_h
+        transcript_y = header_h
+        input_label_y = transcript_y + transcript_h
+        input_y = input_label_y + input_label_h
+        status_y = height - 1
+
+        self.draw_header(width)
+        self.draw_transcript(transcript_y, transcript_h, width)
+        self.draw_input(input_label_y, input_y, width)
+        self.draw_status(status_y, width)
+        self.stdscr.refresh()
+
+    # ---------------------------------------------------------------------
+    # Input editing
+    # ---------------------------------------------------------------------
+
+    def insert_text(self, text: str) -> None:
+        line = self.input_lines[self.cursor_row]
+        self.input_lines[self.cursor_row] = line[: self.cursor_col] + text + line[self.cursor_col :]
+        self.cursor_col += len(text)
+
+    def insert_newline(self) -> None:
+        line = self.input_lines[self.cursor_row]
+        before = line[: self.cursor_col]
+        after = line[self.cursor_col :]
+        self.input_lines[self.cursor_row] = before
+        self.input_lines.insert(self.cursor_row + 1, after)
+        self.cursor_row += 1
+        self.cursor_col = 0
+
+    def backspace(self) -> None:
+        if self.cursor_col > 0:
+            line = self.input_lines[self.cursor_row]
+            self.input_lines[self.cursor_row] = line[: self.cursor_col - 1] + line[self.cursor_col :]
+            self.cursor_col -= 1
+        elif self.cursor_row > 0:
+            previous_len = len(self.input_lines[self.cursor_row - 1])
+            self.input_lines[self.cursor_row - 1] += self.input_lines[self.cursor_row]
+            del self.input_lines[self.cursor_row]
+            self.cursor_row -= 1
+            self.cursor_col = previous_len
+
+    def delete_forward(self) -> None:
+        line = self.input_lines[self.cursor_row]
+        if self.cursor_col < len(line):
+            self.input_lines[self.cursor_row] = line[: self.cursor_col] + line[self.cursor_col + 1 :]
+        elif self.cursor_row < len(self.input_lines) - 1:
+            self.input_lines[self.cursor_row] += self.input_lines[self.cursor_row + 1]
+            del self.input_lines[self.cursor_row + 1]
+
+    def move_left(self) -> None:
+        if self.cursor_col > 0:
+            self.cursor_col -= 1
+        elif self.cursor_row > 0:
+            self.cursor_row -= 1
+            self.cursor_col = len(self.input_lines[self.cursor_row])
+
+    def move_right(self) -> None:
+        line = self.input_lines[self.cursor_row]
+        if self.cursor_col < len(line):
+            self.cursor_col += 1
+        elif self.cursor_row < len(self.input_lines) - 1:
+            self.cursor_row += 1
+            self.cursor_col = 0
+
+    def move_up(self) -> None:
+        if self.cursor_row > 0:
+            self.cursor_row -= 1
+            self.cursor_col = min(self.cursor_col, len(self.input_lines[self.cursor_row]))
+
+    def move_down(self) -> None:
+        if self.cursor_row < len(self.input_lines) - 1:
+            self.cursor_row += 1
+            self.cursor_col = min(self.cursor_col, len(self.input_lines[self.cursor_row]))
+
+    def clear_input(self) -> None:
+        self.input_lines = [""]
+        self.cursor_row = 0
+        self.cursor_col = 0
+        self.input_scroll = 0
+
+    def current_input(self) -> str:
+        return "\n".join(self.input_lines).strip("\n")
+
+    # ---------------------------------------------------------------------
+    # Sending messages
+    # ---------------------------------------------------------------------
+
+    def send_current_message(self) -> None:
+        message = self.current_input()
+        if not message.strip():
+            self.status = "empty message ignored"
+            self.clear_input()
+            return
+
+        user_time = now_time()
+        self.transcript.append(TranscriptItem(self.username, message, user_time))
+        append_log(self.session_path, self.username, message, user_time)
+        self.clear_input()
+        self.transcript_scroll = 0
+
+        self.status = "Generating response..."
+        self.draw()
+
+        context = self.build_context()
+        prompt_text = (context + "\n" if context else "") + "User: " + message
+        raw_output = call_gemini(self.cfg, prompt_text)
+
+        gemini_time = now_time()
+        append_log(self.session_path, "Gemini", raw_output, gemini_time)
+        cleaned_output = extract_attachments(raw_output, self.attachment_dir, self.session_name)
+
+        self.history.append("User: " + message)
+        self.history.append("Assistant: " + cleaned_output)
+        self.trim_history()
+
+        self.transcript.append(TranscriptItem("Gemini", cleaned_output, gemini_time))
+        self.status = "response complete"
+        self.transcript_scroll = 0
+
+    # ---------------------------------------------------------------------
+    # Main event loop
+    # ---------------------------------------------------------------------
+
+    def handle_key(self, ch: int) -> None:
+        if ch in (curses.KEY_F10, 17):  # F10 or Ctrl+Q
+            self.should_quit = True
+            return
+
+        if ch in (curses.KEY_F5, 7):  # F5 or Ctrl+G
+            self.send_current_message()
+            return
+
+        if ch in (10, 13, curses.KEY_ENTER):
+            self.insert_newline()
+        elif ch in (curses.KEY_BACKSPACE, 127, 8):
+            self.backspace()
+        elif ch == curses.KEY_DC:
+            self.delete_forward()
+        elif ch == curses.KEY_LEFT:
+            self.move_left()
+        elif ch == curses.KEY_RIGHT:
+            self.move_right()
+        elif ch == curses.KEY_UP:
+            self.move_up()
+        elif ch == curses.KEY_DOWN:
+            self.move_down()
+        elif ch == curses.KEY_HOME:
+            self.cursor_col = 0
+        elif ch == curses.KEY_END:
+            self.cursor_col = len(self.input_lines[self.cursor_row])
+        elif ch == curses.KEY_PPAGE:
+            self.transcript_scroll += 10
+        elif ch == curses.KEY_NPAGE:
+            self.transcript_scroll = max(0, self.transcript_scroll - 10)
+        elif ch == 21:  # Ctrl+U clears current input
+            self.clear_input()
+        elif ch == 12:  # Ctrl+L redraw
+            pass
+        elif ch == 9:  # tab
+            self.insert_text("    ")
+        elif 32 <= ch <= 126:
+            self.insert_text(chr(ch))
+
+    def run(self, stdscr: curses.window) -> None:
+        self.stdscr = stdscr
+        curses.noecho()
+        curses.cbreak()
+        stdscr.keypad(True)
+
+        self.load_memory_from_session()
+
+        while not self.should_quit:
+            self.draw()
+            try:
+                ch = stdscr.getch()
+            except KeyboardInterrupt:
+                break
+            self.handle_key(ch)
+
+
+# ---------------------------------------------------------------------------
+# Program entry point
+# ---------------------------------------------------------------------------
+
+
+def main() -> int:
+    args = parse_args()
+
+    if args.version:
+        print(f"{PROGRAM} version {VERSION}")
+        return 0
+
+    cfg = load_config()
+    session_dir = cfg.session_dir
+    attachment_dir = cfg.effective_attachment_dir
+    session_dir.mkdir(parents=True, exist_ok=True)
+    attachment_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.list:
+        list_sessions(session_dir)
+        return 0
+
+    if args.resume and args.session_name:
+        print("error: use either a session name or --resume, not both", file=sys.stderr)
+        return 2
+
+    if args.resume:
+        session_name = sanitize_session_name(args.resume)
+        session_path = session_dir / f"{session_name}.log"
+        if not session_path.exists():
+            print(f"error: session not found: {session_name}", file=sys.stderr)
+            return 1
+    elif args.session_name:
+        session_name = sanitize_session_name(args.session_name)
+        session_path = session_dir / f"{session_name}.log"
+    else:
+        session_name = default_session_name()
+        session_path = session_dir / f"{session_name}.log"
+
+    if not cfg.api_key:
+        print("ERROR: GEMINI_API_KEY not set", file=sys.stderr)
+        print("Set it in the environment or ~/.config/gemini-cli/config", file=sys.stderr)
+        return 1
+
+    app = GeminiCursesApp(cfg, session_name, session_path)
+
+    try:
+        curses.wrapper(app.run)
+    except KeyboardInterrupt:
+        return 0
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
