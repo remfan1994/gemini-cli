@@ -1,228 +1,250 @@
-# gemini-cli
+# gemini-terminal-tools
 
-A terminal-based Gemini AI interface designed for Unix-like systems, focusing on simplicity, persistence, and artifact-aware workflows.
+A collection of terminal-first Gemini AI interfaces and utilities designed around Unix-style workflows, persistent sessions, filesystem-oriented storage, and minimal dependencies.
 
-This project provides a lightweight way to interact with Gemini models directly from the terminal, with support for sessions, logging, and automatic code extraction.
+The project currently includes:
 
----
-
-## Overview
-
-`gemini-cli` is a command-line chat interface for Gemini that emphasizes:
-
-- Persistent chat sessions
-- Named and resumable conversations
-- Structured logs
-- Automatic extraction of code artifacts
-- Minimal dependencies
-- Terminal-first interaction design
-
-The project is currently implemented in Bash, with future interfaces planned for ncurses (Python) and potentially a native C version.
+- a lightweight Bash interface
+- a full-screen ncurses interface
+- shared configuration philosophy
+- shared session storage model
+- shared attachment extraction system
 
 ---
 
-## Features
+# Philosophy
 
-### Core
+This project intentionally avoids:
 
-- Interactive terminal chat
-- Session persistence
-- Named sessions
-- Session resume support
-- Session listing
-- Config file support
-- API key via environment or config file
+- Electron
+- browser dependency
+- heavy frameworks
+- opaque storage systems
+- hidden state
 
-### Output handling
+Instead, the project emphasizes:
 
-- Clear separation of:
-  - user input
-  - system status
-  - model output
-- Visual separators for readability
-- “Generating response” status indicator
+- plain text logs
+- filesystem persistence
+- readable source code
+- terminal-native interaction
+- lightweight tooling
+- recoverable sessions
+- artifact-oriented AI workflows
 
-### Artifact system
+The goal is not merely "AI chat in terminal."
 
-- Automatic detection of markdown code blocks
-- Extraction into filesystem attachments
-- Language-aware file extensions
-- Organized attachment storage per session
-
-### Logging
-
-- Timestamped session logs
-- Full raw API response preserved
-- Human-readable chat reconstruction
+The goal is a reusable terminal AI workspace.
 
 ---
 
-## Installation
+# Repository Structure
 
-### Requirements
+```text
+bash/
+    gemini-cli
+    gemini-cli.1
+    CHANGELOG.md
 
-- Bash
-- curl
-- python3
+ncurses/
+    gemini-curses
+    gemini-curses.1
+    CHANGELOG.md
 
-Optional:
-- rlwrap (improves input editing in Bash mode)
+README.md
+LICENSE.txt
+Implementations
+Bash Version (bash/gemini-cli)
 
----
+The Bash version is the lightweight, scriptable edition.
 
-## Configuration
+It is designed for:
 
-Configuration file location:
+constrained systems
+shell integration
+recoverability
+simplicity
+minimal runtime overhead
+Features
+persistent sessions
+named/resumable chats
+timestamped logs
+rolling conversational memory
+attachment extraction
+model discovery
+model autoscan
+numbered model selection
+API-key setup helper
+config-file support
+Dependencies
+bash
+curl
+python3
+Strengths
+highly portable
+easy to inspect
+shell-friendly
+easy to script around
+Limitations
+basic terminal input handling
+Ctrl+D send workflow
+no full-screen UI
+no readline-level editing
+ncurses Version (ncurses/gemini-curses)
+
+The ncurses version is the full-screen terminal interface.
+
+It exists because shell input handling eventually becomes insufficient for:
+
+multiline editing
+wrapped input
+cursor management
+scrolling transcripts
+modal interaction
+model selection UX
+Features
+full-screen curses UI
+wrapped multiline input
+scrollable transcript
+named/resumable sessions
+rolling conversational memory
+attachment extraction
+in-app model selector (F2)
+in-app model autoscan (F4)
+in-app API-key entry (F3)
+transcript replay on resume
+model metadata viewer
+Dependencies
+python3
+curses (standard Python module)
+Strengths
+proper terminal interaction
+better readability
+cleaner workflow
+better future expansion path
+Limitations
+larger than Bash version
+still evolving
+no mouse support yet
+Shared Concepts
+Session Model
+
+Sessions are stored as plain text logs:
+
+SESSION_DIR/<session>.log
+
+Sessions are:
+
+resumable
+human-readable
+easy to back up
+grep-friendly
+Attachment System
+
+When Gemini returns fenced markdown code blocks, they are:
+
+extracted from terminal output
+saved as files
+replaced with attachment notices
+
+Example:
+
+[attachment saved]
+file: linux-help-python-01.py
+
+The original raw Gemini output remains preserved in the session log.
+
+Model Discovery
+
+Google's model list changes over time.
+
+This project intentionally avoids pretending to permanently know the "best" model.
+
+Available models can be listed with:
+
+gemini-cli --models
+gemini-curses --models
+
+Or directly from the Gemini API:
+
+curl "https://generativelanguage.googleapis.com/v1beta/models?key=YOUR_API_KEY"
+Model Autoscan
+
+Autoscan exists for users who do not know which model to choose.
+
+Autoscan:
+
+fetches the live Gemini model list
+filters to generateContent-capable models
+tests candidates with a tiny prompt
+activates the first model that successfully returns text
+
+This avoids relying on hardcoded assumptions about future Google model names.
+
+Examples:
+
+gemini-cli --autoscan-model
+gemini-curses --autoscan-model
+Configuration
+
+Shared config file:
 
 ~/.config/gemini-cli/config
-
 
 Example:
 
 MODEL=gemini-2.5-flash
 HISTORY_LIMIT=12
-GEMINI_API_KEY=your_api_key_here
+
 SESSION_DIR=~/.gpt
 ATTACHMENT_DIR=~/.gpt/attachments
 
+GEMINI_API_KEY=your_api_key_here
 
-### Environment override
+Environment variables override config-file API keys:
 
 export GEMINI_API_KEY="your_key"
+Security Notes
 
+Saving API keys in the config file stores them in plaintext.
 
-Environment variables override config file values.
+Environment variables are preferred when possible.
 
----
+The tools attempt to chmod the config file to 0600 when writing sensitive values.
 
-## Usage
+Documentation
 
-### Start a new session
+Each implementation maintains synchronized:
 
-gemini-cli
+source comments
+built-in help
+man page
+changelog
 
+Feature additions are intended to update all four layers together.
 
-### Named session
+Future Directions
 
-gemini-cli mysession
+Planned or possible future work:
 
+native C ncurses version
+streaming output
+mouse support
+transcript search
+attachment browser
+slash commands
+model capability filters
+token usage statistics
+plugin/helper utilities
+shared core library
+License
 
-### Resume session
+See LICENSE.txt.
 
-gemini-cli --resume mysession
+Project Status
 
+Active experimental terminal AI workspace project.
 
-### List sessions
+The Bash edition is currently the lightweight stable interface.
 
-gemini-cli --list
-
-
-### Help
-
-gemini-cli --help
-gemini-cli -h
-
-
-### Version
-
-gemini-cli --version
-
-
----
-
-## Session model
-
-Sessions are stored as:
-
-SESSION_DIR/<session-name>.log
-
-
-Each log contains:
-
-- timestamped user input
-- raw model output
-- full conversation history
-
----
-
-## Attachment system
-
-When Gemini returns code blocks, they are:
-
-1. extracted automatically
-2. saved to:
-
-ATTACHMENT_DIR/
-
-
-3. replaced in terminal output with a reference marker
-
-Example:
-
-[attachment saved]
-file: mysession-python-01.py
-
-
----
-
-## Architecture
-
-Current implementation (Bash):
-
-- CLI orchestration: Bash
-- API calls: curl
-- JSON parsing: Python
-- Storage: filesystem logs
-- Attachments: Python extraction layer
-
-Planned interfaces:
-
-### ncurses version
-- Full terminal UI
-- Scrollable chat history
-- Input box with proper editing
-- Status bar and session navigation
-
-### C version (future)
-- Native ncurses UI
-- libcurl transport
-- minimal runtime dependency
-- high-performance terminal tool
-
----
-
-## Philosophy
-
-- Unix-first design
-- filesystem persistence
-- minimal dependencies
-- transparent logs
-- reproducible sessions
-- artifact-oriented AI interaction
-
----
-
-## Project structure
-
-bash/
-gemini-cli
-
-ncurses/
-planned implementation
-
-README.md
-LICENSE.txt
-
-
----
-
-## License
-
-See LICENSE.txt for details.
-
----
-
-## Status
-
-Early-stage terminal AI interface evolving toward full ncurses and native implementations.
-
+The ncurses edition is the primary future-facing interface.
