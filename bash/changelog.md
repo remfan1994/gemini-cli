@@ -1,4 +1,46 @@
 # Changelog
+## 2.3
+
+### Added
+- `--models` command for listing Gemini generateContent-compatible models
+- `--autoscan-model` command for testing available models until one works
+- `--autoscan-model --save` for saving the first working model to config
+- `--select-model` numbered model selection menu
+- `--select-model --save` for saving selected model without confirmation
+- `--set-api-key` helper for saving GEMINI_API_KEY to config
+- Model discovery documentation in script comments and man page
+- Model autoscan documentation in script comments and man page
+- Fallback model labeling when MODEL is not configured
+- API-key setup documentation
+- Safer JSON payload construction using Python json.dumps
+- Better Gemini API error reporting
+- Session-name sanitization
+- Attachment numbering that avoids overwriting previous attachment files
+
+### Changed
+- MODEL may now be unset in config; gemini-cli uses a clearly labeled fallback model
+- `gemini-2.5-flash` is now documented as a fallback, not as a permanent recommendation
+- Prompts are now encoded through Python JSON generation instead of shell string interpolation
+- Model selection is now future-resistant through live model listing and autoscan
+- Bash edition remains line-oriented rather than imitating ncurses UI behavior
+
+### Documentation
+- Updated man page synopsis with model-management commands
+- Added MODEL DISCOVERY section
+- Added MODEL AUTOSCAN section
+- Added MODEL SELECTION section
+- Added MODEL FALLBACK section
+- Added API KEY SETUP section
+- Updated CONFIGURATION section
+- Updated LIMITATIONS section
+
+### Notes
+- Autoscan finds a functional model, not necessarily the best model.
+- Autoscan may consume multiple API calls.
+- The ncurses edition remains the preferred interface for full-screen interactive behavior.
+- The Bash edition remains the lightweight fallback and scriptable utility version.
+
+
 ## 2.2
 
 ### Added
