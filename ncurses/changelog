@@ -1,4 +1,42 @@
 # Changelog
+## 0.5.0
+
+### Added
+- Mouse event support through curses.mousemask
+- Mousewheel transcript scrolling in the main chat view
+- Left-click input cursor placement in the input area
+- Mousewheel navigation in the model selector
+- Left-click model row selection in the model selector
+- Double-click model activation in the model selector
+- Mouse dismissal support for message dialogs
+- Mouse-assisted yes/no dialogs
+- Mouse-assisted API-key cursor placement
+- Layout coordinate tracking for mouse hit detection
+- Input segment mapping for click-to-cursor behavior
+- Mouse support documentation in the man page
+
+### Changed
+- Main event loop now handles curses.KEY_MOUSE
+- Input rendering now stores visual segment metadata for mouse cursor placement
+- Model selector help text now includes click and double-click behavior
+- Message dialogs now indicate they can be dismissed by keypress or click
+- Yes/no dialogs now document click behavior
+- Status line reports mousewheel transcript scrolling and input cursor placement
+
+### Documentation
+- Added MOUSE SUPPORT section to man page
+- Documented mousewheel transcript scrolling
+- Documented input-area click behavior
+- Documented model-selector mouse behavior
+- Documented mouse behavior in message and yes/no dialogs
+- Updated LIMITATIONS section with terminal-emulator mouse dependency
+- Clarified that terminal text selection remains the terminal emulator's responsibility
+
+### Notes
+- Mousewheel support commonly appears as BUTTON4/BUTTON5 in curses-compatible terminals.
+- Mouse behavior depends on terminal emulator support.
+- Drag selection and mouse-based transcript text selection are intentionally not implemented in this release.
+
 ## 0.4.0
 
 ### Added
