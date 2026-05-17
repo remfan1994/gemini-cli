@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.2.0
+
+### Added
+- F2 in-app model selector
+- `--models` command-line model listing
+- Gemini model discovery through the v1beta models endpoint
+- Filtering of listed models to generateContent-compatible models
+- F3 API-key setup inside the interface
+- Startup API-key prompt when no key is configured
+- Optional saving of pasted API key to config file
+- Optional saving of selected model to config file
+- Config update helper for writing KEY=VALUE entries
+- Config-file permission hardening attempt with chmod 0600
+- Visual input wrapping inside the ncurses input area
+- Model change notices in transcript
+- Model selector modal with keyboard navigation
+- API-key input modal with masked display
+- Yes/no confirmation modal
+- Message modal for errors and status notices
+
+### Changed
+- Input display now wraps visually inside the input box instead of relying on terminal line wrapping
+- Status bar now documents F2 model selector and F3 API-key setup
+- Send behavior remains Ctrl+G/F5
+- API-key absence no longer forces immediate shell-level failure; the TUI can prompt for a key
+- Model IDs are normalized so both `gemini-x` and `models/gemini-x` forms are accepted
+- Help and man page now document model discovery
+
+### Documentation
+- Updated man page synopsis with `--models`
+- Added MODEL DISCOVERY section
+- Added API KEY SETUP section
+- Updated controls documentation
+- Documented F2 model selector
+- Documented F3 API-key setup
+- Documented visual input wrapping
+- Documented API-key precedence
+
+### Notes
+- Ctrl+G remains the primary send key in curses because it is easy to detect and avoids conflict with Enter-as-newline behavior.
+- The Bash edition should receive a matching `--models` feature and documentation update in its next synchronized revision.
+
+
 ## 0.1.0
 
 ### Added
