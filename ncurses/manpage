@@ -8,6 +8,7 @@ SYNOPSIS
     gemini-curses <session_name>
     gemini-curses --resume <session_name>
     gemini-curses --list
+    gemini-curses --models
     gemini-curses --version
     gemini-curses --help
 
@@ -18,10 +19,13 @@ DESCRIPTION
     It provides:
         - scrollable transcript area
         - multiline input box
+        - visual input wrapping
         - proper cursor movement
         - named and resumable sessions
         - timestamped logs
         - rolling memory context
+        - model discovery and model selection
+        - API-key entry from the interface
         - attachment extraction for code blocks
 
 SESSION MANAGEMENT
@@ -38,6 +42,9 @@ SESSION MANAGEMENT
     gemini-curses --list
         List saved sessions.
 
+    gemini-curses --models
+        List available Gemini generation models and exit.
+
     gemini-curses --version
         Display version information.
 
@@ -51,6 +58,15 @@ CONTROLS
     Ctrl+G
     F5
         Send the current message.
+
+    F2
+        Open the model selector. The selector fetches available Gemini
+        generation models, lets the user choose one, activates it for the
+        current session, and optionally saves it to the config file.
+
+    F3
+        Open API-key setup. The user may paste a Gemini API key into the
+        interface and optionally save it to the config file.
 
     F10
     Ctrl+Q
@@ -77,6 +93,23 @@ CONTROLS
 
     Tab
         Insert four spaces.
+
+MODEL DISCOVERY
+    The tool supports two model discovery paths.
+
+    From the shell:
+
+        gemini-curses --models
+
+    From inside the interface:
+
+        F2
+
+    The underlying Gemini REST API endpoint is:
+
+        https://generativelanguage.googleapis.com/v1beta/models?key=YOUR_API_KEY
+
+    The tool filters the returned list to models that support generateContent.
 
 CONFIGURATION
     Configuration file:
@@ -113,6 +146,19 @@ ENVIRONMENT
         Precedence:
             1. Environment variable
             2. Config file
+            3. API-key setup entered through the interface
+
+API KEY SETUP
+    If no API key is found, gemini-curses prompts for one at startup.
+
+    The F3 key opens API-key setup during a running session.
+
+    The entered key may be used for only the current run or saved to:
+
+        ~/.config/gemini-cli/config
+
+    Saving the API key stores it in plaintext. The tool attempts to set the
+    config file permission to 0600 when writing the key.
 
 FILES
     ~/.config/gemini-cli/config
@@ -156,11 +202,11 @@ LIMITATIONS
     - Requires Python 3 with curses support
     - Requires internet access
     - API quota restrictions apply
-    - Long input lines horizontally scroll inside the input area
+    - ASCII input handling in this first release
     - No mouse support in this first release
 
 VERSION
-    gemini-curses version 0.1.0
+    gemini-curses version 0.2.0
 
 AUTHOR
     Part of the gemini-cli terminal AI workspace project.
