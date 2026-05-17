@@ -1,0 +1,166 @@
+GEMINI-CURSES(1)           User Commands           GEMINI-CURSES(1)
+
+NAME
+    gemini-curses - ncurses terminal interface for the Gemini API
+
+SYNOPSIS
+    gemini-curses
+    gemini-curses <session_name>
+    gemini-curses --resume <session_name>
+    gemini-curses --list
+    gemini-curses --version
+    gemini-curses --help
+
+DESCRIPTION
+    gemini-curses is a Python ncurses interface for Gemini. It is the
+    full-screen terminal interface companion to the Bash gemini-cli tool.
+
+    It provides:
+        - scrollable transcript area
+        - multiline input box
+        - proper cursor movement
+        - named and resumable sessions
+        - timestamped logs
+        - rolling memory context
+        - attachment extraction for code blocks
+
+SESSION MANAGEMENT
+    gemini-curses
+        Start a new timestamped session.
+
+    gemini-curses <name>
+        Start or open a named session.
+
+    gemini-curses --resume <name>
+        Resume an existing named session. If the session does not exist,
+        the command exits with an error.
+
+    gemini-curses --list
+        List saved sessions.
+
+    gemini-curses --version
+        Display version information.
+
+    gemini-curses --help
+        Display built-in help.
+
+CONTROLS
+    Enter
+        Insert newline in the input box.
+
+    Ctrl+G
+    F5
+        Send the current message.
+
+    F10
+    Ctrl+Q
+        Quit the interface.
+
+    PgUp
+        Scroll transcript upward.
+
+    PgDn
+        Scroll transcript downward.
+
+    Arrow keys
+        Move cursor inside the input box.
+
+    Home
+    End
+        Move cursor to beginning or end of current input line.
+
+    Ctrl+U
+        Clear current input.
+
+    Ctrl+L
+        Redraw screen.
+
+    Tab
+        Insert four spaces.
+
+CONFIGURATION
+    Configuration file:
+        ~/.config/gemini-cli/config
+
+    The ncurses version intentionally uses the same configuration file as
+    the Bash version.
+
+    Supported keys:
+
+        MODEL
+            Gemini model identifier.
+            Default: gemini-2.5-flash
+
+        HISTORY_LIMIT
+            Number of recent conversation entries retained in memory.
+            Default: 12
+
+        GEMINI_API_KEY
+            Optional API key. Environment variable takes priority.
+
+        SESSION_DIR
+            Directory used for session log storage.
+            Default: ~/.gpt
+
+        ATTACHMENT_DIR
+            Directory used for extracted code artifacts.
+            Default: SESSION_DIR/attachments
+
+ENVIRONMENT
+    GEMINI_API_KEY
+        Preferred API key source.
+
+        Precedence:
+            1. Environment variable
+            2. Config file
+
+FILES
+    ~/.config/gemini-cli/config
+        Configuration file.
+
+    SESSION_DIR/*.log
+        Session log files.
+
+    ATTACHMENT_DIR/
+        Extracted code block attachments.
+
+ATTACHMENT SYSTEM
+    Markdown fenced code blocks returned by Gemini are extracted from
+    terminal display and saved into ATTACHMENT_DIR.
+
+    The original raw Gemini response remains preserved in the session log.
+
+    File names follow this pattern:
+
+        <session>-<type>-NN.<extension>
+
+    Examples:
+
+        android-backup-python-01.py
+        linux-help-bash-02.sh
+        notes-json-01.json
+
+SESSION NAMES
+    Session names are sanitized for filesystem safety.
+
+    Characters outside letters, numbers, dot, dash, and underscore are
+    converted to underscores.
+
+MEMORY MODEL
+    gemini-curses keeps a rolling conversation context in memory.
+
+    When resuming an existing session, the tool rebuilds recent memory from
+    the session log.
+
+LIMITATIONS
+    - Requires Python 3 with curses support
+    - Requires internet access
+    - API quota restrictions apply
+    - Long input lines horizontally scroll inside the input area
+    - No mouse support in this first release
+
+VERSION
+    gemini-curses version 0.1.0
+
+AUTHOR
+    Part of the gemini-cli terminal AI workspace project.
