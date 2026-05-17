@@ -30,6 +30,42 @@ DESCRIPTION
         - in-app model autoscan
         - in-app API key entry
 
+USAGE
+    First-time setup:
+
+        gemini-curses
+            Then press F3 to paste an API key.
+            Then press F4 to autoscan for a working model.
+
+    Start a normal timestamped chat:
+
+        gemini-curses
+
+    Start a named full-screen chat:
+
+        gemini-curses android-backup
+
+    Resume a named chat:
+
+        gemini-curses --resume android-backup
+
+    List saved chats:
+
+        gemini-curses --list
+
+    List currently available Gemini models:
+
+        gemini-curses --models
+
+    Find a working model from the shell:
+
+        gemini-curses --autoscan-model
+
+    Use the in-app model tools:
+
+        F2    manual model selector
+        F4    autoscan for working model
+
 SESSION MANAGEMENT
     gemini-curses
         Start a new timestamped session.
@@ -245,42 +281,6 @@ LIMITATIONS
     - F2 model selection is persistent only if saved when prompted
     - F4 autoscan model selection is persistent only if saved when prompted
     - No mouse support in this release
-
-USAGE
-    First-time setup:
-
-        gemini-curses
-            Then press F3 to paste an API key.
-            Then press F4 to autoscan for a working model.
-
-    Start a normal timestamped chat:
-
-        gemini-curses
-
-    Start a named full-screen chat:
-
-        gemini-curses android-backup
-
-    Resume a named chat:
-
-        gemini-curses --resume android-backup
-
-    List saved chats:
-
-        gemini-curses --list
-
-    List currently available Gemini models:
-
-        gemini-curses --models
-
-    Find a working model from the shell:
-
-        gemini-curses --autoscan-model
-
-    Use the in-app model tools:
-
-        F2    manual model selector
-        F4    autoscan for working model
 
 VERSION
     gemini-curses version 0.3.0
