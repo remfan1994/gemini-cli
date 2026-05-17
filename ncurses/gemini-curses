@@ -26,16 +26,17 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 PROGRAM = "gemini-curses"
 FALLBACK_MODEL = "gemini-2.5-flash"
-AUTOSCAN_TEST_PROMPT = "Reply with OK."
+DEFAULT_AUTOSCAN_PROMPT = "What is the capital of Texas?"
+DEFAULT_AUTOSCAN_EXPECTED = "austin"
 
 
 # ---------------------------------------------------------------------------
 # Configuration model
 # ---------------------------------------------------------------------------
-# The ncurses edition intentionally uses the same config keys as the Bash
+# The ncurses edition intentionally uses the same config file as the Bash
 # edition. A user can keep one ~/.config/gemini-cli/config file and use either
 # interface.
 #
@@ -47,8 +48,13 @@ AUTOSCAN_TEST_PROMPT = "Reply with OK."
 # Model autoscan note:
 #   Because Google's model list can change, gemini-curses does not try to know
 #   the permanent "best" model. The F4/--autoscan-model feature fetches the live
-#   model list, tests generateContent-compatible models with a tiny prompt, and
-#   activates the first model that actually returns usable text.
+#   model list, tests generateContent-compatible models with a small factual
+#   challenge, and activates the first model that returns the expected answer.
+#
+# Memory terminology note:
+#   CONTEXT_TURNS is the preferred config key. It means recent user/assistant
+#   exchanges sent back to Gemini for conversational continuity. HISTORY_LIMIT
+#   is still accepted as a legacy alias so older configs do not break.
 # ---------------------------------------------------------------------------
 
 
@@ -58,10 +64,12 @@ class Config:
     # program can still use FALLBACK_MODEL, but the UI labels it as a fallback,
     # not as a permanent recommendation.
     model: str = ""
-    history_limit: int = 12
+    context_turns: int = 12
     api_key: str = ""
     session_dir: Path = field(default_factory=lambda: Path.home() / ".gpt")
     attachment_dir: Optional[Path] = None
+    autoscan_prompt: str = DEFAULT_AUTOSCAN_PROMPT
+    autoscan_expected: str = DEFAULT_AUTOSCAN_EXPECTED
     config_file: Path = field(
         default_factory=lambda: Path.home() / ".config" / "gemini-cli" / "config"
     )
@@ -90,10 +98,19 @@ def normalize_model_id(model: str) -> str:
     return model
 
 
+def parse_positive_int(value: str, fallback: int) -> int:
+    try:
+        parsed = int(value)
+    except ValueError:
+        return fallback
+    return max(1, parsed)
+
+
 def load_config() -> Config:
     """Load ~/.config/gemini-cli/config using simple KEY=VALUE parsing."""
     cfg = Config()
     env_api_key = os.environ.get("GEMINI_API_KEY", "")
+    context_turns_explicit = False
 
     if cfg.config_file.exists():
         with cfg.config_file.open("r", encoding="utf-8") as fh:
@@ -114,11 +131,15 @@ def load_config() -> Config:
 
                 if key == "MODEL":
                     cfg.model = normalize_model_id(value)
+                elif key == "CONTEXT_TURNS":
+                    cfg.context_turns = parse_positive_int(value, cfg.context_turns)
+                    context_turns_explicit = True
                 elif key == "HISTORY_LIMIT":
-                    try:
-                        cfg.history_limit = max(1, int(value))
-                    except ValueError:
-                        cfg.history_limit = 12
+                    # Legacy compatibility. CONTEXT_TURNS is clearer because
+                    # this setting controls how many conversation exchanges are
+                    # sent back as context, not shell command history.
+                    if not context_turns_explicit:
+                        cfg.context_turns = parse_positive_int(value, cfg.context_turns)
                 elif key == "GEMINI_API_KEY":
                     # Environment variable wins. Config-file storage is a
                     # convenience path, not the preferred security model.
@@ -127,6 +148,12 @@ def load_config() -> Config:
                     cfg.session_dir = expand_path(value)
                 elif key == "ATTACHMENT_DIR":
                     cfg.attachment_dir = expand_path(value)
+                elif key == "AUTOSCAN_PROMPT":
+                    if value:
+                        cfg.autoscan_prompt = value
+                elif key == "AUTOSCAN_EXPECTED":
+                    if value:
+                        cfg.autoscan_expected = value.lower()
 
     if env_api_key:
         cfg.api_key = env_api_key
@@ -174,7 +201,7 @@ def set_config_value(cfg: Config, key: str, value: str) -> None:
 # ---------------------------------------------------------------------------
 # The interface mirrors the Bash version, with ncurses-specific additions:
 # --models lists available Gemini models, and --autoscan-model tests models
-# until one actually works.
+# until one actually answers a small challenge correctly.
 # ---------------------------------------------------------------------------
 
 
@@ -408,12 +435,20 @@ def print_models(cfg: Config) -> int:
     return 0
 
 
+def autoscan_response_is_valid(cfg: Config, text: str) -> bool:
+    expected = cfg.autoscan_expected.strip().lower()
+    if not expected:
+        expected = DEFAULT_AUTOSCAN_EXPECTED
+    return expected in text.lower()
+
+
 def autoscan_model(cfg: Config, progress=None) -> Tuple[Optional[ModelInfo], str]:
-    """Find the first model that actually produces valid text.
+    """Find the first model that answers the autoscan challenge correctly.
 
     This is intentionally empirical. Instead of guessing what Google's future
     model names mean, autoscan fetches the current model list and tests each
-    generateContent-compatible candidate with a minimal prompt.
+    generateContent-compatible candidate with a factual prompt. The model must
+    return text containing the expected answer substring.
     """
     models, error = fetch_models(cfg)
     if error:
@@ -429,12 +464,20 @@ def autoscan_model(cfg: Config, progress=None) -> Tuple[Optional[ModelInfo], str
         if progress is not None:
             progress(index, total, model)
 
-        ok, text = generate_with_model(cfg, model.model_id, AUTOSCAN_TEST_PROMPT, timeout=45)
-        if ok:
+        ok, text = generate_with_model(cfg, model.model_id, cfg.autoscan_prompt, timeout=45)
+        if ok and autoscan_response_is_valid(cfg, text):
             return model, text.strip()
-        failures.append(f"{model.model_id}: {text}")
 
-    summary = "No tested model returned a valid text response."
+        if ok:
+            expected = cfg.autoscan_expected.strip().lower() or DEFAULT_AUTOSCAN_EXPECTED
+            snippet = text.strip().replace("\n", " ")[:200]
+            failures.append(
+                f"{model.model_id}: response did not contain expected substring '{expected}'; response: {snippet}"
+            )
+        else:
+            failures.append(f"{model.model_id}: {text}")
+
+    summary = "No tested model answered the autoscan challenge correctly."
     if failures:
         summary += " Last failure: " + failures[-1]
     return None, summary
@@ -646,7 +689,7 @@ class GeminiCursesApp:
         self.attachment_dir = cfg.effective_attachment_dir
         self.username = os.environ.get("USER") or os.environ.get("LOGNAME") or "user"
 
-        self.history: List[str] = []
+        self.context_buffer: List[str] = []
         self.transcript: List[TranscriptItem] = []
         self.transcript_scroll = 0
 
@@ -675,21 +718,26 @@ class GeminiCursesApp:
         for entry in entries[-self.TRANSCRIPT_REPLAY_LIMIT :]:
             self.transcript.append(TranscriptItem(entry.speaker, entry.text, entry.timestamp))
 
-        for entry in entries[-self.cfg.history_limit :]:
+        # CONTEXT_TURNS counts user/assistant exchanges. Since the internal
+        # buffer stores individual speaker entries, we keep up to twice that
+        # number of entries when rebuilding memory from logs.
+        max_entries = self.cfg.context_turns * 2
+        for entry in entries[-max_entries:]:
             if entry.speaker == "Gemini":
-                self.history.append("Assistant: " + entry.text)
+                self.context_buffer.append("Assistant: " + entry.text)
             else:
-                self.history.append("User: " + entry.text)
+                self.context_buffer.append("User: " + entry.text)
 
-        self.trim_history()
+        self.trim_context_buffer()
         self.status = f"loaded session: {self.session_name}"
 
-    def trim_history(self) -> None:
-        if len(self.history) > self.cfg.history_limit:
-            self.history = self.history[-self.cfg.history_limit :]
+    def trim_context_buffer(self) -> None:
+        max_entries = self.cfg.context_turns * 2
+        if len(self.context_buffer) > max_entries:
+            self.context_buffer = self.context_buffer[-max_entries:]
 
     def build_context(self) -> str:
-        return "\n".join(self.history)
+        return "\n".join(self.context_buffer)
 
     # ---------------------------------------------------------------------
     # Safe curses drawing
@@ -1192,9 +1240,9 @@ class GeminiCursesApp:
         append_log(self.session_path, "Gemini", raw_output, gemini_time)
         cleaned_output = extract_attachments(raw_output, self.attachment_dir, self.session_name)
 
-        self.history.append("User: " + message)
-        self.history.append("Assistant: " + cleaned_output)
-        self.trim_history()
+        self.context_buffer.append("User: " + message)
+        self.context_buffer.append("Assistant: " + cleaned_output)
+        self.trim_context_buffer()
 
         self.transcript.append(TranscriptItem("Gemini", cleaned_output, gemini_time))
         self.status = "response complete"
