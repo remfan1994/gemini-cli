@@ -26,11 +26,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 PROGRAM = "gemini-curses"
 FALLBACK_MODEL = "gemini-2.5-flash"
 DEFAULT_AUTOSCAN_PROMPT = "What is the capital of Texas?"
 DEFAULT_AUTOSCAN_EXPECTED = "austin"
+MOUSE_SCROLL_LINES = 3
 
 
 # ---------------------------------------------------------------------------
@@ -664,6 +665,14 @@ class TranscriptItem:
     timestamp: str = field(default_factory=now_time)
 
 
+@dataclass
+class InputSegment:
+    display: str
+    logical_row: int
+    start: int
+    available: int
+
+
 # ---------------------------------------------------------------------------
 # Curses application
 # ---------------------------------------------------------------------------
@@ -675,6 +684,7 @@ class TranscriptItem:
 #   - model selection without editing config
 #   - API-key entry without editing config
 #   - autoscan model selection without guessing future model names
+#   - mousewheel scrolling and mouse-assisted navigation
 # ---------------------------------------------------------------------------
 
 
@@ -697,6 +707,12 @@ class GeminiCursesApp:
         self.cursor_row = 0
         self.cursor_col = 0
         self.input_scroll = 0
+
+        # Layout coordinates are refreshed on every draw. Mouse handling uses
+        # these values to determine whether a click belongs to the transcript,
+        # input box, status bar, or function-key label area.
+        self.layout: dict[str, int] = {}
+        self.last_input_segments: List[InputSegment] = []
 
         self.status = self.default_status()
         self.should_quit = False
@@ -789,10 +805,10 @@ class GeminiCursesApp:
             if offset < len(visible):
                 self.safe_addstr(y, 0, visible[offset], width)
 
-    def input_visual_rows(self, width: int) -> Tuple[List[str], int, int]:
+    def input_segments(self, width: int) -> Tuple[List[InputSegment], int, int]:
         marker_width = 2
         available = max(1, width - marker_width)
-        rows: List[str] = []
+        segments: List[InputSegment] = []
         cursor_visual_index = 0
         cursor_x = marker_width
 
@@ -809,33 +825,35 @@ class GeminiCursesApp:
                 start = segment * available
                 end = start + available
                 marker = "> " if logical_row == 0 and segment == 0 else "  "
-                rows.append(marker + line[start:end])
+                chunk = line[start:end]
+                segments.append(InputSegment(marker + chunk, logical_row, start, available))
 
                 if logical_row == self.cursor_row and segment == cursor_segment:
-                    cursor_visual_index = len(rows) - 1
+                    cursor_visual_index = len(segments) - 1
                     cursor_x = marker_width + (self.cursor_col % available)
 
-        return rows or ["> "], cursor_visual_index, cursor_x
+        return segments or [InputSegment("> ", 0, 0, max(1, width - 2))], cursor_visual_index, cursor_x
 
     def draw_input(self, label_y: int, input_y: int, width: int) -> None:
         label = "INPUT: Enter=newline | Ctrl+G/F5=send | F2=models | F3=API key | F4=autoscan"
         self.safe_addstr(label_y, 0, "_" * width, width)
         self.safe_addstr(label_y, 0, label, width)
 
-        rows, cursor_visual_index, cursor_x = self.input_visual_rows(width)
+        segments, cursor_visual_index, cursor_x = self.input_segments(width)
+        self.last_input_segments = segments
 
         if cursor_visual_index < self.input_scroll:
             self.input_scroll = cursor_visual_index
         elif cursor_visual_index >= self.input_scroll + self.INPUT_HEIGHT:
             self.input_scroll = cursor_visual_index - self.INPUT_HEIGHT + 1
 
-        max_scroll = max(0, len(rows) - self.INPUT_HEIGHT)
+        max_scroll = max(0, len(segments) - self.INPUT_HEIGHT)
         self.input_scroll = max(0, min(self.input_scroll, max_scroll))
 
-        visible = rows[self.input_scroll : self.input_scroll + self.INPUT_HEIGHT]
+        visible = segments[self.input_scroll : self.input_scroll + self.INPUT_HEIGHT]
         for offset in range(self.INPUT_HEIGHT):
             y = input_y + offset
-            text = visible[offset] if offset < len(visible) else ""
+            text = visible[offset].display if offset < len(visible) else ""
             self.safe_addstr(y, 0, text, width)
 
         cursor_screen_y = input_y + cursor_visual_index - self.input_scroll
@@ -855,6 +873,7 @@ class GeminiCursesApp:
 
         min_height = self.INPUT_HEIGHT + 6
         if height < min_height or width < 40:
+            self.layout = {}
             self.safe_addstr(0, 0, "terminal too small", width)
             self.stdscr.refresh()
             return
@@ -868,11 +887,102 @@ class GeminiCursesApp:
         input_y = input_label_y + input_label_h
         status_y = height - 1
 
+        self.layout = {
+            "width": width,
+            "height": height,
+            "transcript_y": transcript_y,
+            "transcript_h": transcript_h,
+            "input_label_y": input_label_y,
+            "input_y": input_y,
+            "input_h": self.INPUT_HEIGHT,
+            "status_y": status_y,
+        }
+
         self.draw_header(width)
         self.draw_transcript(transcript_y, transcript_h, width)
         self.draw_input(input_label_y, input_y, width)
         self.draw_status(status_y, width)
         self.stdscr.refresh()
+
+    # ---------------------------------------------------------------------
+    # Mouse handling
+    # ---------------------------------------------------------------------
+    # Mouse support is deliberately practical:
+    #   - wheel scrolls the transcript in the main view
+    #   - left click in the input area places the input cursor
+    #   - wheel scrolls modal lists where implemented
+    #   - model selector rows can be clicked and double-clicked
+    #
+    # Native terminal text selection and drag-copy are left to the terminal
+    # emulator. Ncurses applications should not try to replace the user's
+    # terminal selection model.
+    # ---------------------------------------------------------------------
+
+    def mouse_wheel_delta(self, state: int) -> int:
+        if state & getattr(curses, "BUTTON4_PRESSED", 0):
+            return 1
+        if state & getattr(curses, "BUTTON5_PRESSED", 0):
+            return -1
+        return 0
+
+    def mouse_button1(self, state: int) -> bool:
+        masks = [
+            getattr(curses, "BUTTON1_PRESSED", 0),
+            getattr(curses, "BUTTON1_CLICKED", 0),
+            getattr(curses, "BUTTON1_DOUBLE_CLICKED", 0),
+            getattr(curses, "BUTTON1_TRIPLE_CLICKED", 0),
+        ]
+        return any(state & mask for mask in masks)
+
+    def mouse_button1_double(self, state: int) -> bool:
+        return bool(state & getattr(curses, "BUTTON1_DOUBLE_CLICKED", 0))
+
+    def handle_mouse(self) -> None:
+        try:
+            _mouse_id, x, y, _z, state = curses.getmouse()
+        except curses.error:
+            return
+
+        delta = self.mouse_wheel_delta(state)
+        if delta:
+            # Wheel up means move older in transcript, which is represented by
+            # increasing transcript_scroll. Wheel down reduces the scroll offset.
+            if delta > 0:
+                self.transcript_scroll += MOUSE_SCROLL_LINES
+            else:
+                self.transcript_scroll = max(0, self.transcript_scroll - MOUSE_SCROLL_LINES)
+            self.status = "mousewheel: transcript scroll"
+            return
+
+        if not self.layout:
+            return
+
+        if self.mouse_button1(state):
+            input_y = self.layout.get("input_y", -1)
+            input_h = self.layout.get("input_h", 0)
+            if input_y <= y < input_y + input_h:
+                self.place_cursor_from_mouse(x, y - input_y)
+                self.status = "mouse: input cursor placed"
+                return
+
+            transcript_y = self.layout.get("transcript_y", -1)
+            transcript_h = self.layout.get("transcript_h", 0)
+            if transcript_y <= y < transcript_y + transcript_h:
+                self.status = "mouse: transcript area"
+                return
+
+    def place_cursor_from_mouse(self, x: int, visible_row: int) -> None:
+        index = self.input_scroll + visible_row
+        if index < 0 or index >= len(self.last_input_segments):
+            return
+
+        segment = self.last_input_segments[index]
+        line = self.input_lines[segment.logical_row]
+        clicked_col = max(0, x - 2)
+        logical_col = min(len(line), segment.start + clicked_col)
+
+        self.cursor_row = segment.logical_row
+        self.cursor_col = logical_col
 
     # ---------------------------------------------------------------------
     # Modal helpers
@@ -899,7 +1009,7 @@ class GeminiCursesApp:
                     self.safe_addstr(y, left + 2, wrapped, box_w - 4)
                     y += 1
 
-            self.safe_addstr(top + box_h - 2, left + 2, "Press any key to continue", box_w - 4)
+            self.safe_addstr(top + box_h - 2, left + 2, "Press any key or click to continue", box_w - 4)
             self.safe_addstr(top + box_h - 1, left, "+" + "-" * (box_w - 2) + "+")
             self.stdscr.refresh()
             self.stdscr.getch()
@@ -924,11 +1034,20 @@ class GeminiCursesApp:
                 y += 1
 
             default_label = "yes" if default else "no"
-            self.safe_addstr(top + box_h - 2, left + 2, f"Y/N? Enter={default_label} | Esc=no", box_w - 4)
+            prompt = f"Y/N? Enter={default_label} | Esc=no | click left half=yes, right half=no"
+            self.safe_addstr(top + box_h - 2, left + 2, prompt, box_w - 4)
             self.safe_addstr(top + box_h - 1, left, "+" + "-" * (box_w - 2) + "+")
             self.stdscr.refresh()
 
             ch = self.stdscr.getch()
+            if ch == curses.KEY_MOUSE:
+                try:
+                    _mouse_id, x, y_mouse, _z, state = curses.getmouse()
+                except curses.error:
+                    continue
+                if self.mouse_button1(state) and top <= y_mouse <= top + box_h:
+                    return x < left + (box_w // 2)
+                continue
             if ch in (ord("y"), ord("Y")):
                 return True
             if ch in (ord("n"), ord("N"), 27):
@@ -975,6 +1094,18 @@ class GeminiCursesApp:
             self.stdscr.refresh()
 
             ch = self.stdscr.getch()
+            if ch == curses.KEY_MOUSE:
+                try:
+                    _mouse_id, x, _y, _z, state = curses.getmouse()
+                except curses.error:
+                    continue
+                if self.mouse_button1(state):
+                    # Clicking inside the key field places the editing cursor
+                    # approximately where the user clicked.
+                    field_start = left + 7
+                    if x >= field_start:
+                        cursor = min(len(key), max(0, len(key) - len(shown) + (x - field_start)))
+                continue
             if ch in (10, 13, curses.KEY_ENTER):
                 if key.strip():
                     self.cfg.api_key = key.strip()
@@ -1058,7 +1189,7 @@ class GeminiCursesApp:
 
             self.safe_addstr(0, 0, "MODEL SELECTOR", width)
             self.safe_addstr(1, 0, f"Current model: {self.model_label()}", width)
-            self.safe_addstr(2, 0, "Enter=activate | i=info | Esc/q=cancel | Up/Down=move | PgUp/PgDn=page", width)
+            self.safe_addstr(2, 0, "Enter=activate | i=info | click=select | dbl-click=activate | wheel=scroll", width)
             self.safe_addstr(3, 0, "_" * width, width)
 
             if selected < top_index:
@@ -1085,6 +1216,35 @@ class GeminiCursesApp:
             self.stdscr.refresh()
 
             ch = self.stdscr.getch()
+            if ch == curses.KEY_MOUSE:
+                try:
+                    _mouse_id, _x, y, _z, state = curses.getmouse()
+                except curses.error:
+                    continue
+
+                delta = self.mouse_wheel_delta(state)
+                if delta > 0:
+                    selected = max(0, selected - MOUSE_SCROLL_LINES)
+                    continue
+                if delta < 0:
+                    selected = min(len(models) - 1, selected + MOUSE_SCROLL_LINES)
+                    continue
+
+                if self.mouse_button1(state) and 4 <= y < 4 + visible_h:
+                    idx = top_index + (y - 4)
+                    if 0 <= idx < len(models):
+                        selected = idx
+                        if self.mouse_button1_double(state):
+                            chosen = models[selected]
+                            self.cfg.model = chosen.model_id
+                            self.status = f"activated model: {chosen.model_id}"
+                            self.transcript.append(TranscriptItem("system", f"Model activated: {chosen.model_id}"))
+                            self.maybe_save_model_to_config()
+                            return
+                    continue
+
+                continue
+
             if ch in (27, ord("q"), ord("Q")):
                 self.status = "model selection cancelled"
                 return
@@ -1253,6 +1413,10 @@ class GeminiCursesApp:
     # ---------------------------------------------------------------------
 
     def handle_key(self, ch: int) -> None:
+        if ch == curses.KEY_MOUSE:
+            self.handle_mouse()
+            return
+
         if ch in (curses.KEY_F10, 17):  # F10 or Ctrl+Q
             self.should_quit = True
             return
@@ -1309,6 +1473,16 @@ class GeminiCursesApp:
         curses.noecho()
         curses.cbreak()
         stdscr.keypad(True)
+
+        # Enable mouse events. BUTTON4/BUTTON5 are commonly used by terminals
+        # for mousewheel up/down. REPORT_MOUSE_POSITION is requested where the
+        # curses implementation supports it, but drag tracking is not required.
+        mouse_mask = curses.ALL_MOUSE_EVENTS
+        mouse_mask |= getattr(curses, "REPORT_MOUSE_POSITION", 0)
+        try:
+            curses.mousemask(mouse_mask)
+        except curses.error:
+            pass
 
         self.load_session_into_ui()
         if not self.cfg.api_key:
