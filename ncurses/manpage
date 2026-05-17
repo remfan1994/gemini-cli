@@ -24,18 +24,18 @@ DESCRIPTION
         - proper cursor movement
         - named and resumable sessions
         - timestamped logs
-        - rolling memory context
+        - rolling conversation context
         - attachment extraction for code blocks
         - in-app model selection
         - in-app model autoscan
         - in-app API key entry
 
 USAGE
-    First-time setup:
+    First-time setup from inside the interface:
 
         gemini-curses
-            Then press F3 to paste an API key.
-            Then press F4 to autoscan for a working model.
+            Press F3 to paste an API key.
+            Press F4 to autoscan for a working model.
 
     Start a normal timestamped chat:
 
@@ -61,11 +61,6 @@ USAGE
 
         gemini-curses --autoscan-model
 
-    Use the in-app model tools:
-
-        F2    manual model selector
-        F4    autoscan for working model
-
 SESSION MANAGEMENT
     gemini-curses
         Start a new timestamped session.
@@ -85,8 +80,8 @@ SESSION MANAGEMENT
 
     gemini-curses --autoscan-model
         Fetch the current model list, test each generateContent-compatible
-        model with a minimal prompt, and print the first working model ID to
-        standard output. Progress is printed to standard error.
+        model with the autoscan challenge, and print the first working model
+        ID to standard output. Progress is printed to standard error.
 
     gemini-curses --version
         Display version information.
@@ -121,8 +116,8 @@ CONTROLS
     F4
         Run model autoscan. The tool fetches the live model list, tests
         generateContent-compatible models in API-returned order, activates
-        the first model that returns usable text, and offers to save it to
-        the config file.
+        the first model that answers the autoscan challenge correctly, and
+        offers to save it to the config file.
 
     F10
     Ctrl+Q
@@ -180,9 +175,17 @@ MODEL AUTOSCAN
 
         1. Fetch the live Gemini model list.
         2. Filter to models that support generateContent.
-        3. Test each candidate with a minimal prompt:
-               Reply with OK.
-        4. Activate the first model that returns valid text.
+        3. Test each candidate with the autoscan challenge.
+        4. Activate the first model that returns text containing the expected
+           answer substring.
+
+    Default autoscan challenge:
+
+        Prompt:
+            What is the capital of Texas?
+
+        Expected substring:
+            austin
 
     Autoscan does not guarantee the best model. It only finds a functional
     text-generation model available to the current API key.
@@ -191,6 +194,7 @@ MODEL AUTOSCAN
 
 CONFIGURATION
     Configuration file:
+
         ~/.config/gemini-cli/config
 
     The ncurses version intentionally uses the same configuration file as
@@ -207,9 +211,15 @@ CONFIGURATION
 
             Use F4 or --autoscan-model to find a currently working model.
 
-        HISTORY_LIMIT
-            Number of recent conversation entries retained in memory.
+        CONTEXT_TURNS
+            Number of recent user/assistant exchanges sent back to Gemini as
+            conversation context.
+
             Default: 12
+
+        HISTORY_LIMIT
+            Legacy alias for CONTEXT_TURNS. Kept for compatibility with older
+            config files.
 
         GEMINI_API_KEY
             Optional API key. Environment variable takes priority.
@@ -221,6 +231,14 @@ CONFIGURATION
         ATTACHMENT_DIR
             Directory used for extracted code artifacts.
             Default: SESSION_DIR/attachments
+
+        AUTOSCAN_PROMPT
+            Prompt used when testing candidate models during autoscan.
+            Default: What is the capital of Texas?
+
+        AUTOSCAN_EXPECTED
+            Case-insensitive substring required in the autoscan response.
+            Default: austin
 
 ENVIRONMENT
     GEMINI_API_KEY
@@ -269,7 +287,10 @@ SESSION NAMES
 MEMORY MODEL
     gemini-curses keeps a rolling conversation context in memory.
 
-    When resuming an existing session, the tool rebuilds recent memory from
+    CONTEXT_TURNS controls how many recent user/assistant exchanges are sent
+    back to Gemini with each request.
+
+    When resuming an existing session, the tool rebuilds recent context from
     the session log and displays recent log entries in the transcript window.
 
 LIMITATIONS
@@ -277,13 +298,14 @@ LIMITATIONS
     - Requires internet access
     - API quota restrictions apply
     - Autoscan may consume multiple API calls
+    - Autoscan only verifies the configured challenge, not overall model quality
     - F3 API-key input is not persistent
     - F2 model selection is persistent only if saved when prompted
     - F4 autoscan model selection is persistent only if saved when prompted
     - No mouse support in this release
 
 VERSION
-    gemini-curses version 0.3.0
+    gemini-curses version 0.4.0
 
 AUTHOR
     Part of the gemini-cli terminal AI workspace project.
