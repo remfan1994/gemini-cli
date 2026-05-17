@@ -1,4 +1,40 @@
 # Changelog
+## 0.3.0
+
+### Added
+- F4 model autoscan inside the ncurses interface
+- `--autoscan-model` command-line autoscan mode
+- Empirical model testing with a minimal prompt
+- Autoscan progress display in the status bar
+- Optional config saving after F4 autoscan selection
+- Optional config saving after F2 manual model selection
+- `i` model-info view inside the F2 model selector
+- Fallback model labeling when no MODEL is configured
+- Config update helper for saving selected MODEL values
+- Autoscan documentation in comments and man page
+
+### Changed
+- The model default is now treated as a fallback, not a permanent recommendation
+- `MODEL` may be unset; the UI labels the fallback clearly
+- Model selection is now more future-resistant because autoscan tests live API behavior
+- F2 model selector now exposes API metadata through the info view
+- Header now displays fallback state when no explicit MODEL is configured
+
+### Documentation
+- Added `--autoscan-model` to man page synopsis
+- Added MODEL AUTOSCAN section
+- Expanded MODEL DISCOVERY section
+- Documented F4 autoscan control
+- Documented autoscan API-call cost
+- Documented that autoscan finds a functional model, not necessarily the best model
+- Documented persistence behavior for F2 and F4 model choices
+
+### Notes
+- Autoscan tests models in the order returned by the Gemini models endpoint.
+- Autoscan does not rely on hardcoded future model-name assumptions.
+- The fallback model remains `gemini-2.5-flash`, but it is now explicitly labeled as a fallback.
+
+
 
 ## 0.2.0
 
@@ -41,6 +77,7 @@
 ### Notes
 - Ctrl+G remains the primary send key in curses because it is easy to detect and avoids conflict with Enter-as-newline behavior.
 - The Bash edition should receive a matching `--models` feature and documentation update in its next synchronized revision.
+
 
 
 ## 0.1.0
