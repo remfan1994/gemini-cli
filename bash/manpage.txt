@@ -37,6 +37,40 @@ DESCRIPTION
         - numbered model selection
         - API-key setup helper
 
+USAGE
+    First-time setup:
+
+        gemini-cli --set-api-key
+        gemini-cli --autoscan-model --save
+
+    Start a normal timestamped chat:
+
+        gemini-cli
+
+    Start a named chat:
+
+        gemini-cli android-backup
+
+    Resume a named chat:
+
+        gemini-cli --resume android-backup
+
+    List saved chats:
+
+        gemini-cli --list
+
+    List currently available Gemini models:
+
+        gemini-cli --models
+
+    Choose a model manually:
+
+        gemini-cli --select-model
+
+    Find and save the first working model automatically:
+
+        gemini-cli --autoscan-model --save
+
 SESSION MANAGEMENT
     gemini-cli
         Start a new timestamped session.
@@ -224,40 +258,6 @@ LIMITATIONS
     - Autoscan may consume multiple API calls
     - Basic terminal input only; no ncurses-style editing
     - Ctrl+D is used to send multiline input
-
-USAGE
-    First-time setup:
-
-        gemini-cli --set-api-key
-        gemini-cli --autoscan-model --save
-
-    Start a normal timestamped chat:
-
-        gemini-cli
-
-    Start a named chat:
-
-        gemini-cli android-backup
-
-    Resume a named chat:
-
-        gemini-cli --resume android-backup
-
-    List saved chats:
-
-        gemini-cli --list
-
-    List currently available Gemini models:
-
-        gemini-cli --models
-
-    Choose a model manually:
-
-        gemini-cli --select-model
-
-    Find and save the first working model automatically:
-
-        gemini-cli --autoscan-model --save
 
 VERSION
     gemini-cli version 2.3
