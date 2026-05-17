@@ -1,0 +1,54 @@
+# Changelog
+
+## 0.1.0
+
+### Added
+- Initial Python ncurses implementation
+- Full-screen terminal interface
+- Scrollable transcript window
+- Multiline input box
+- Proper cursor movement inside input
+- Backspace support across logical input lines
+- Horizontal scrolling for long input lines
+- F5 send shortcut
+- Ctrl+G send shortcut
+- F10 quit shortcut
+- Ctrl+Q quit shortcut
+- PgUp/PgDn transcript scrolling
+- Ctrl+U input clearing
+- Ctrl+L redraw support
+- Named session support
+- Timestamped session log support
+- Resume support
+- Session listing
+- Version flag
+- Built-in help through argparse
+- Shared config support with Bash version
+- GEMINI_API_KEY environment/config support
+- Configurable SESSION_DIR support
+- Configurable ATTACHMENT_DIR support
+- Rolling memory context
+- Memory rebuild from resumed session logs
+- Attachment extraction for fenced markdown code blocks
+- Language-aware attachment file extensions
+- Attachment numbering that avoids overwriting previous files
+- JSON request construction using Python json.dumps
+- Gemini API transport through Python standard library urllib
+
+### Changed
+- Input handling moved from shell stdin to ncurses-managed editor
+- Terminal redraw behavior moved from line output to full-screen interface
+- API payload construction no longer depends on shell string escaping
+- Session names are sanitized for filesystem safety
+
+### Documentation
+- Added gemini-curses(1) man page
+- Documented controls
+- Documented shared config behavior
+- Documented attachment system
+- Documented session name sanitization
+- Documented known limitations
+
+### Notes
+- This is the first usable ncurses release.
+- The Bash version remains useful as the lightweight fallback implementation.
