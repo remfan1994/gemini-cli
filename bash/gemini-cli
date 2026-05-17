@@ -6,7 +6,7 @@
 # Bash-based terminal Gemini AI interface.
 #
 # VERSION
-#   2.3
+#   2.4
 #
 # DESIGN ROLE
 #   This Bash edition is the lightweight, line-oriented
@@ -17,15 +17,26 @@
 #   - Persistent chat sessions
 #   - Named/resumable conversations
 #   - Timestamped logs
-#   - Lightweight rolling memory
+#   - Rolling conversation context
+#   - Resume-time memory rebuild from session logs
 #   - Config file support
 #   - Built-in help/version system
 #   - Automatic attachment extraction
 #   - Configurable storage directories
 #   - Model listing
-#   - Model autoscan
+#   - Model autoscan with answer validation
 #   - Numbered model selection
 #   - API-key setup helper
+#
+# MEMORY / CONTEXT TERMINOLOGY
+#   CONTEXT_TURNS is the preferred config key.
+#
+#   It means recent user/assistant exchanges sent back to
+#   Gemini so the model can follow the conversation. It does
+#   not mean shell command history or complete log length.
+#
+#   HISTORY_LIMIT is still accepted as a legacy alias so old
+#   configs do not break.
 #
 # MODEL MANAGEMENT
 #   Google model names can change over time. This script does
@@ -47,6 +58,17 @@
 #   The raw Google model-list command is:
 #
 #     curl "https://generativelanguage.googleapis.com/v1beta/models?key=YOUR_API_KEY"
+#
+# AUTOSCAN CHALLENGE
+#   Autoscan no longer accepts any non-empty output.
+#
+#   Default challenge:
+#     Prompt:   What is the capital of Texas?
+#     Expected: austin
+#
+#   These can be changed in config:
+#     AUTOSCAN_PROMPT=What is the capital of Texas?
+#     AUTOSCAN_EXPECTED=austin
 #
 # API KEY MANAGEMENT
 #   Preferred:
@@ -71,7 +93,7 @@
 set -o pipefail
 
 PROGRAM="gemini-cli"
-VERSION="2.3"
+VERSION="2.4"
 
 CONFIG_DIR="$HOME/.config/gemini-cli"
 CONFIG_FILE="$CONFIG_DIR/config"
@@ -82,11 +104,13 @@ ATTACHMENT_DIR_CONFIGURED=0
 
 FALLBACK_MODEL="gemini-2.5-flash"
 MODEL=""
-HISTORY_LIMIT=12
-AUTOSCAN_TEST_PROMPT="Reply with OK."
+CONTEXT_TURNS=12
+CONTEXT_TURNS_EXPLICIT=0
+AUTOSCAN_PROMPT="What is the capital of Texas?"
+AUTOSCAN_EXPECTED="austin"
 
 USER_NAME="$(whoami)"
-HISTORY=()
+CONTEXT_BUFFER=()
 SUMMARY=""
 
 
@@ -156,6 +180,24 @@ print(name or "session")
 ' "$1"
 }
 
+positive_int_or_default() {
+  local value="$1"
+  local fallback="$2"
+
+  case "$value" in
+    ""|*[!0-9]*)
+      printf '%s\n' "$fallback"
+      ;;
+    *)
+      if [ "$value" -lt 1 ]; then
+        printf '%s\n' "$fallback"
+      else
+        printf '%s\n' "$value"
+      fi
+      ;;
+  esac
+}
+
 
 # ==========================================================
 # CONFIG FILE SUPPORT
@@ -163,10 +205,13 @@ print(name or "session")
 # Supported keys:
 #
 #   MODEL
-#   HISTORY_LIMIT
+#   CONTEXT_TURNS
+#   HISTORY_LIMIT        legacy alias for CONTEXT_TURNS
 #   GEMINI_API_KEY
 #   SESSION_DIR
 #   ATTACHMENT_DIR
+#   AUTOSCAN_PROMPT
+#   AUTOSCAN_EXPECTED
 #
 # Format:
 #   KEY=VALUE
@@ -200,8 +245,18 @@ if [ -f "$CONFIG_FILE" ]; then
         MODEL="$(normalize_model_id "$value")"
         ;;
 
+      CONTEXT_TURNS)
+        CONTEXT_TURNS="$value"
+        CONTEXT_TURNS_EXPLICIT=1
+        ;;
+
       HISTORY_LIMIT)
-        HISTORY_LIMIT="$value"
+        # Legacy compatibility. CONTEXT_TURNS is clearer because
+        # this setting controls conversation context, not shell
+        # history or log size.
+        if [ "$CONTEXT_TURNS_EXPLICIT" -eq 0 ]; then
+          CONTEXT_TURNS="$value"
+        fi
         ;;
 
       GEMINI_API_KEY)
@@ -216,19 +271,23 @@ if [ -f "$CONFIG_FILE" ]; then
         ATTACHMENT_DIR="$(expand_path "$value")"
         ATTACHMENT_DIR_CONFIGURED=1
         ;;
+
+      AUTOSCAN_PROMPT)
+        if [ -n "$value" ]; then
+          AUTOSCAN_PROMPT="$value"
+        fi
+        ;;
+
+      AUTOSCAN_EXPECTED)
+        if [ -n "$value" ]; then
+          AUTOSCAN_EXPECTED="$value"
+        fi
+        ;;
     esac
   done < "$CONFIG_FILE"
 fi
 
-case "$HISTORY_LIMIT" in
-  ""|*[!0-9]*)
-    HISTORY_LIMIT=12
-    ;;
-esac
-
-if [ "$HISTORY_LIMIT" -lt 1 ]; then
-  HISTORY_LIMIT=12
-fi
+CONTEXT_TURNS="$(positive_int_or_default "$CONTEXT_TURNS" 12)"
 
 if [ "$ATTACHMENT_DIR_CONFIGURED" -eq 0 ]; then
   ATTACHMENT_DIR="$SESSION_DIR/attachments"
@@ -323,10 +382,11 @@ USAGE
         Start new timestamped session.
 
     $PROGRAM <name>
-        Start/create named session.
+        Start/create named session. If the log already exists, recent
+        context is rebuilt from it.
 
     $PROGRAM --resume <name>
-        Resume named session.
+        Resume named session and rebuild recent context from its log.
 
     $PROGRAM --list
         List saved sessions.
@@ -335,7 +395,8 @@ USAGE
         List available Gemini generateContent models.
 
     $PROGRAM --autoscan-model
-        Test available models and print the first working model.
+        Test available models and print the first model that answers the
+        autoscan challenge correctly.
 
     $PROGRAM --autoscan-model --save
         Test available models, then save the first working MODEL to config.
@@ -361,10 +422,13 @@ CONFIG FILE
 
 SUPPORTED CONFIG KEYS
     MODEL
-    HISTORY_LIMIT
+    CONTEXT_TURNS
+    HISTORY_LIMIT        legacy alias for CONTEXT_TURNS
     GEMINI_API_KEY
     SESSION_DIR
     ATTACHMENT_DIR
+    AUTOSCAN_PROMPT
+    AUTOSCAN_EXPECTED
 
 MODEL DISCOVERY
     Raw Google API command:
@@ -377,8 +441,14 @@ MODEL DISCOVERY
 
 MODEL AUTOSCAN
     Autoscan fetches the live model list, filters to generateContent models,
-    tests candidates with a minimal prompt, and uses the first model that
-    returns valid text.
+    tests candidates with a factual challenge, and uses the first model that
+    returns the expected answer substring.
+
+    Default prompt:
+        $AUTOSCAN_PROMPT
+
+    Default expected substring:
+        $AUTOSCAN_EXPECTED
 
 INPUT
     Type/paste text, then press Ctrl+D to send.
@@ -411,6 +481,77 @@ list_sessions() {
     [ -e "$path" ] || continue
     basename "$path" .log
   done
+}
+
+
+# ==========================================================
+# RESUME MEMORY REBUILD
+# ----------------------------------------------------------
+# Bash now has parity with the ncurses edition here.
+#
+# If a session log already exists, the script parses recent
+# entries from the log and rebuilds CONTEXT_BUFFER. This means
+# follow-up questions after --resume can refer to earlier
+# messages in the same session.
+#
+# CONTEXT_TURNS counts user/assistant exchanges. Since the log
+# contains separate speaker entries, we load up to
+# CONTEXT_TURNS * 2 entries.
+# ==========================================================
+
+load_context_from_session() {
+  python3 - "$SESSION" "$CONTEXT_TURNS" <<'PY'
+import re
+import sys
+
+path = sys.argv[1]
+try:
+    context_turns = int(sys.argv[2])
+except Exception:
+    context_turns = 12
+
+max_entries = max(1, context_turns) * 2
+entry_re = re.compile(r"^\[(\d{2}:\d{2}:\d{2})\] ([^:]+): (.*)$")
+entries = []
+current_speaker = None
+current_lines = []
+
+try:
+    fh = open(path, "r", encoding="utf-8", errors="replace")
+except FileNotFoundError:
+    sys.exit(0)
+
+with fh:
+    for raw_line in fh:
+        line = raw_line.rstrip("\n")
+        match = entry_re.match(line)
+        if match:
+            if current_speaker is not None:
+                entries.append((current_speaker, "\n".join(current_lines)))
+            current_speaker = match.group(2)
+            current_lines = [match.group(3)]
+        else:
+            if current_speaker is not None:
+                current_lines.append(line)
+
+if current_speaker is not None:
+    entries.append((current_speaker, "\n".join(current_lines)))
+
+for speaker, text in entries[-max_entries:]:
+    label = "Assistant" if speaker == "Gemini" else "User"
+    entry = f"{label}: {text}"
+    sys.stdout.buffer.write(entry.encode("utf-8", errors="replace") + b"\0")
+PY
+}
+
+rebuild_context_from_session() {
+  CONTEXT_BUFFER=()
+
+  [ -f "$SESSION" ] || return 0
+
+  while IFS= read -r -d '' entry; do
+    CONTEXT_BUFFER+=("$entry")
+  done < <(load_context_from_session)
 }
 
 
@@ -641,9 +782,19 @@ call_gemini_model() {
 # Autoscan:
 #   1. Fetches the live model list.
 #   2. Filters to generateContent models.
-#   3. Tests each with a tiny prompt.
-#   4. Prints the first model that returns valid text.
+#   3. Tests each with AUTOSCAN_PROMPT.
+#   4. Validates that the response contains AUTOSCAN_EXPECTED.
+#   5. Prints the first model that passes.
 # ==========================================================
+
+autoscan_response_valid() {
+  python3 -c '
+import sys
+expected = sys.argv[1].strip().lower() or "austin"
+text = sys.stdin.read().lower()
+sys.exit(0 if expected in text else 1)
+' "$AUTOSCAN_EXPECTED"
+}
 
 autoscan_model() {
   local json
@@ -654,6 +805,7 @@ autoscan_model() {
   local output
   local status
   local last_error=""
+  local snippet
 
   json="$(fetch_models_json)" || return 1
   ids_text="$(printf '%s' "$json" | parse_model_ids)" || return 1
@@ -671,18 +823,23 @@ autoscan_model() {
     i=$((i + 1))
     printf 'testing %s/%s: %s\n' "$i" "$total" "$model" >&2
 
-    output="$(call_gemini_model "$model" "$AUTOSCAN_TEST_PROMPT" 45)"
+    output="$(call_gemini_model "$model" "$AUTOSCAN_PROMPT" 45)"
     status=$?
 
-    if [ "$status" -eq 0 ] && [ -n "$output" ]; then
+    if [ "$status" -eq 0 ] && printf '%s' "$output" | autoscan_response_valid; then
       printf '%s\n' "$model"
       return 0
     fi
 
-    last_error="$output"
+    if [ "$status" -eq 0 ]; then
+      snippet="$(printf '%s' "$output" | tr '\n' ' ' | cut -c 1-200)"
+      last_error="response did not contain expected substring '$AUTOSCAN_EXPECTED'; response: $snippet"
+    else
+      last_error="$output"
+    fi
   done
 
-  printf '%s\n' "No tested model returned valid text. Last error: $last_error"
+  printf '%s\n' "No tested model answered the autoscan challenge correctly. Last error: $last_error"
   return 1
 }
 
@@ -846,17 +1003,29 @@ set_api_key_command() {
 
 
 # ==========================================================
-# MEMORY SYSTEM
+# CONTEXT MEMORY SYSTEM
 # ----------------------------------------------------------
-# Lightweight rolling memory. This is not full transcript
-# replay. It keeps the last HISTORY_LIMIT entries in context.
+# Lightweight rolling conversation context.
+#
+# CONTEXT_TURNS counts recent user/assistant exchanges.
+# Internally, each exchange is two entries:
+#   User: ...
+#   Assistant: ...
+#
+# Therefore the actual entry buffer limit is:
+#   CONTEXT_TURNS * 2
 # ==========================================================
 
-add_to_history() {
-  HISTORY+=("$1")
+add_to_context() {
+  CONTEXT_BUFFER+=("$1")
+  trim_context_buffer
+}
 
-  while [ "${#HISTORY[@]}" -gt "$HISTORY_LIMIT" ]; do
-    HISTORY=("${HISTORY[@]:1}")
+trim_context_buffer() {
+  local max_entries=$((CONTEXT_TURNS * 2))
+
+  while [ "${#CONTEXT_BUFFER[@]}" -gt "$max_entries" ]; do
+    CONTEXT_BUFFER=("${CONTEXT_BUFFER[@]:1}")
   done
 }
 
@@ -864,12 +1033,11 @@ build_context() {
   local context="$SUMMARY"
   local msg
 
-  for msg in "${HISTORY[@]}"; do
+  for msg in "${CONTEXT_BUFFER[@]}"; do
     if [ -n "$context" ]; then
-      context="${context}"$'\n'"$msg"
-    else
-      context="$msg"
+      context+=$'\n'
     fi
+    context+="$msg"
   done
 
   printf '%s' "$context"
@@ -1104,11 +1272,21 @@ if [ "$RESUME" -eq 1 ] && [ ! -f "$SESSION" ]; then
   exit 1
 fi
 
+# Rebuild recent conversation context from any existing session log. This
+# applies to --resume and also to named sessions that already exist.
+rebuild_context_from_session
+
 ACTIVE_MODEL="$(effective_model)"
 
 printf '%s\n' "$PROGRAM"
 printf 'session: %s\n' "$SESSION"
 printf 'model: %s\n' "$(model_label)"
+printf 'context turns: %s\n' "$CONTEXT_TURNS"
+
+if [ -f "$SESSION" ] && [ "${#CONTEXT_BUFFER[@]}" -gt 0 ]; then
+  printf 'loaded context entries: %s\n' "${#CONTEXT_BUFFER[@]}"
+fi
+
 printf '%s\n' "Ctrl+D to send message, Ctrl+C to exit"
 printf '%s\n' ""
 
@@ -1135,7 +1313,7 @@ while true; do
 
   printf '[%s] %s: %s\n' "$TS" "$USER_NAME" "$buffer" >> "$SESSION"
 
-  add_to_history "User: $buffer"
+  add_to_context "User: $buffer"
 
   printf '%s\n' ""
   printf '%s\n' "________________________________________"
@@ -1147,13 +1325,7 @@ while true; do
   printf '%s\n' "________________________________________"
   printf '%s\n' ""
 
-  context="$(build_context)"
-
-  if [ -n "$context" ]; then
-    prompt_text="${context}"$'\n'"User: $buffer"
-  else
-    prompt_text="User: $buffer"
-  fi
+  prompt_text="$(build_context)"
 
   output="$(call_gemini_model "$ACTIVE_MODEL" "$prompt_text" 120)"
   output_status=$?
@@ -1168,7 +1340,7 @@ while true; do
 
   cleaned_output="$(printf '%s' "$output" | extract_attachments)"
 
-  add_to_history "Assistant: $cleaned_output"
+  add_to_context "Assistant: $cleaned_output"
 
   printf '%s\n\n' "$cleaned_output"
 done
