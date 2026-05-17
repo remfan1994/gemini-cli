@@ -22,6 +22,9 @@ DESCRIPTION
         - multiline input box
         - wrapped input display
         - proper cursor movement
+        - mousewheel scrolling
+        - mouse-assisted input cursor placement
+        - mouse-assisted model selection
         - named and resumable sessions
         - timestamped logs
         - rolling conversation context
@@ -144,6 +147,54 @@ CONTROLS
 
     Tab
         Insert four spaces.
+
+MOUSE SUPPORT
+    Mouse support depends on terminal emulator support for ncurses mouse
+    events.
+
+    Main chat view:
+
+        Mouse wheel up
+            Scroll transcript upward toward older output.
+
+        Mouse wheel down
+            Scroll transcript downward toward newer output.
+
+        Left click in input area
+            Place the input cursor near the clicked position.
+
+        Left click in transcript area
+            Focuses transcript area status only. Text selection remains the
+            terminal emulator's responsibility.
+
+    Model selector:
+
+        Mouse wheel up/down
+            Move through the model list.
+
+        Left click on a model row
+            Highlight that model.
+
+        Double click on a model row
+            Activate that model.
+
+    Message dialogs:
+
+        Click
+            Dismiss message dialog.
+
+    Yes/no dialogs:
+
+        Left half click
+            Answer yes.
+
+        Right half click
+            Answer no.
+
+    API-key dialog:
+
+        Left click inside the key field
+            Place the approximate editing cursor position.
 
 MODEL DISCOVERY
     Available Gemini models can be listed from the command line:
@@ -302,10 +353,13 @@ LIMITATIONS
     - F3 API-key input is not persistent
     - F2 model selection is persistent only if saved when prompted
     - F4 autoscan model selection is persistent only if saved when prompted
-    - No mouse support in this release
+    - Mouse support depends on terminal emulator support for ncurses mouse events
+    - Terminal text selection and copy behavior remain terminal-emulator features
+    - Drag selection is not implemented by gemini-curses
+    - No mouse-based transcript text selection in this release
 
 VERSION
-    gemini-curses version 0.4.0
+    gemini-curses version 0.5.0
 
 AUTHOR
     Part of the gemini-cli terminal AI workspace project.
