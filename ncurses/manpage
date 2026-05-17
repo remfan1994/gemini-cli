@@ -9,6 +9,7 @@ SYNOPSIS
     gemini-curses --resume <session_name>
     gemini-curses --list
     gemini-curses --models
+    gemini-curses --autoscan-model
     gemini-curses --version
     gemini-curses --help
 
@@ -19,14 +20,15 @@ DESCRIPTION
     It provides:
         - scrollable transcript area
         - multiline input box
-        - visual input wrapping
+        - wrapped input display
         - proper cursor movement
         - named and resumable sessions
         - timestamped logs
         - rolling memory context
-        - model discovery and model selection
-        - API-key entry from the interface
         - attachment extraction for code blocks
+        - in-app model selection
+        - in-app model autoscan
+        - in-app API key entry
 
 SESSION MANAGEMENT
     gemini-curses
@@ -43,7 +45,12 @@ SESSION MANAGEMENT
         List saved sessions.
 
     gemini-curses --models
-        List available Gemini generation models and exit.
+        List available Gemini models that support generateContent, then exit.
+
+    gemini-curses --autoscan-model
+        Fetch the current model list, test each generateContent-compatible
+        model with a minimal prompt, and print the first working model ID to
+        standard output. Progress is printed to standard error.
 
     gemini-curses --version
         Display version information.
@@ -60,13 +67,26 @@ CONTROLS
         Send the current message.
 
     F2
-        Open the model selector. The selector fetches available Gemini
-        generation models, lets the user choose one, activates it for the
-        current session, and optionally saves it to the config file.
+        Open the in-app model selector. The selector retrieves the model list
+        from the Gemini models endpoint and activates the selected model for
+        the current program run.
+
+        Press i inside the selector to view metadata for the highlighted
+        model, including display name, API name, token limits, supported
+        methods, and description.
+
+        After selecting a model, the user is offered the option to save it to
+        the config file as MODEL=<model_id>.
 
     F3
-        Open API-key setup. The user may paste a Gemini API key into the
-        interface and optionally save it to the config file.
+        Open the API-key input dialog. The pasted key is activated for the
+        current program run only. It is not written to the config file.
+
+    F4
+        Run model autoscan. The tool fetches the live model list, tests
+        generateContent-compatible models in API-returned order, activates
+        the first model that returns usable text, and offers to save it to
+        the config file.
 
     F10
     Ctrl+Q
@@ -79,7 +99,7 @@ CONTROLS
         Scroll transcript downward.
 
     Arrow keys
-        Move cursor inside the input box.
+        Move cursor inside the input box or navigate selectors.
 
     Home
     End
@@ -95,21 +115,43 @@ CONTROLS
         Insert four spaces.
 
 MODEL DISCOVERY
-    The tool supports two model discovery paths.
-
-    From the shell:
+    Available Gemini models can be listed from the command line:
 
         gemini-curses --models
 
-    From inside the interface:
+    They can also be listed directly with curl:
 
-        F2
+        curl "https://generativelanguage.googleapis.com/v1beta/models?key=YOUR_API_KEY"
 
-    The underlying Gemini REST API endpoint is:
+    Inside the ncurses interface, press F2 to open the model selector.
 
-        https://generativelanguage.googleapis.com/v1beta/models?key=YOUR_API_KEY
+    The selector shows model IDs and metadata returned by the API. The tool
+    does not claim to know the best model permanently because Google's model
+    list may change.
 
-    The tool filters the returned list to models that support generateContent.
+MODEL AUTOSCAN
+    Model autoscan is intended for users who do not know which model to pick.
+
+    From the shell:
+
+        gemini-curses --autoscan-model
+
+    Inside the interface:
+
+        F4
+
+    Autoscan performs the following steps:
+
+        1. Fetch the live Gemini model list.
+        2. Filter to models that support generateContent.
+        3. Test each candidate with a minimal prompt:
+               Reply with OK.
+        4. Activate the first model that returns valid text.
+
+    Autoscan does not guarantee the best model. It only finds a functional
+    text-generation model available to the current API key.
+
+    Autoscan may consume multiple API calls.
 
 CONFIGURATION
     Configuration file:
@@ -122,7 +164,12 @@ CONFIGURATION
 
         MODEL
             Gemini model identifier.
-            Default: gemini-2.5-flash
+
+            If MODEL is not configured, gemini-curses labels
+            gemini-2.5-flash as a fallback model. This is not a promise that
+            the fallback is best or permanently available.
+
+            Use F4 or --autoscan-model to find a currently working model.
 
         HISTORY_LIMIT
             Number of recent conversation entries retained in memory.
@@ -146,19 +193,10 @@ ENVIRONMENT
         Precedence:
             1. Environment variable
             2. Config file
-            3. API-key setup entered through the interface
+            3. F3 runtime API-key input
 
-API KEY SETUP
-    If no API key is found, gemini-curses prompts for one at startup.
-
-    The F3 key opens API-key setup during a running session.
-
-    The entered key may be used for only the current run or saved to:
-
-        ~/.config/gemini-cli/config
-
-    Saving the API key stores it in plaintext. The tool attempts to set the
-    config file permission to 0600 when writing the key.
+    The F3 API-key input feature is session-only. It does not save the key
+    to disk.
 
 FILES
     ~/.config/gemini-cli/config
@@ -196,17 +234,20 @@ MEMORY MODEL
     gemini-curses keeps a rolling conversation context in memory.
 
     When resuming an existing session, the tool rebuilds recent memory from
-    the session log.
+    the session log and displays recent log entries in the transcript window.
 
 LIMITATIONS
     - Requires Python 3 with curses support
     - Requires internet access
     - API quota restrictions apply
-    - ASCII input handling in this first release
-    - No mouse support in this first release
+    - Autoscan may consume multiple API calls
+    - F3 API-key input is not persistent
+    - F2 model selection is persistent only if saved when prompted
+    - F4 autoscan model selection is persistent only if saved when prompted
+    - No mouse support in this release
 
 VERSION
-    gemini-curses version 0.2.0
+    gemini-curses version 0.3.0
 
 AUTHOR
     Part of the gemini-cli terminal AI workspace project.
