@@ -3,7 +3,15 @@
 # ==========================================================
 # gemini-cli
 # ----------------------------------------------------------
-# Terminal-based Gemini AI workspace
+# Bash-based terminal Gemini AI interface.
+#
+# VERSION
+#   2.3
+#
+# DESIGN ROLE
+#   This Bash edition is the lightweight, line-oriented
+#   version of the project. It is meant to stay simple,
+#   scriptable, readable, and usable in constrained shells.
 #
 # FEATURES
 #   - Persistent chat sessions
@@ -14,71 +22,145 @@
 #   - Built-in help/version system
 #   - Automatic attachment extraction
 #   - Configurable storage directories
+#   - Model listing
+#   - Model autoscan
+#   - Numbered model selection
+#   - API-key setup helper
 #
-# ATTACHMENT SYSTEM
-#   Markdown fenced code blocks returned by Gemini are:
+# MODEL MANAGEMENT
+#   Google model names can change over time. This script does
+#   not try to permanently know the best model.
 #
-#     - removed from terminal output
-#     - saved as reusable files
-#     - replaced with attachment notices
+#   Users can:
+#     - list models:
+#         gemini-cli --models
 #
-# DESIGN GOALS
-#   - minimal dependencies
-#   - shell-friendly
-#   - readable logs
-#   - artifact-oriented workflow
-#   - publishable architecture
+#     - autoscan for a working model:
+#         gemini-cli --autoscan-model
+#
+#     - autoscan and save:
+#         gemini-cli --autoscan-model --save
+#
+#     - choose from a numbered list:
+#         gemini-cli --select-model
+#
+#   The raw Google model-list command is:
+#
+#     curl "https://generativelanguage.googleapis.com/v1beta/models?key=YOUR_API_KEY"
+#
+# API KEY MANAGEMENT
+#   Preferred:
+#     export GEMINI_API_KEY=your_key
+#
+#   Convenient:
+#     gemini-cli --set-api-key
+#
+#   Config file:
+#     ~/.config/gemini-cli/config
+#
+# SECURITY NOTE
+#   Saving an API key in the config file stores it in plaintext.
+#   The script attempts to chmod the config file to 0600.
+#
+# INPUT MODEL
+#   This Bash version keeps the Ctrl+D send workflow.
+#   Type/paste input, then press Ctrl+D to submit it.
+#
 # ==========================================================
 
+set -o pipefail
 
-# ==========================================================
-# CONFIGURATION LOCATIONS
-# ----------------------------------------------------------
-# CONFIG_DIR
-#   Stores gemini-cli configuration files
-#
-# CONFIG_FILE
-#   Main runtime configuration file
-# ==========================================================
+PROGRAM="gemini-cli"
+VERSION="2.3"
 
 CONFIG_DIR="$HOME/.config/gemini-cli"
 CONFIG_FILE="$CONFIG_DIR/config"
 
-
-# ==========================================================
-# DEFAULT STORAGE LOCATIONS
-# ----------------------------------------------------------
-# These defaults may be overridden inside the config file.
-#
-# SESSION_DIR
-#   Stores persistent conversation logs
-#
-# ATTACHMENT_DIR
-#   Stores extracted code artifacts
-# ==========================================================
-
 SESSION_DIR="$HOME/.gpt"
-ATTACHMENT_DIR="$SESSION_DIR/attachments"
+ATTACHMENT_DIR=""
+ATTACHMENT_DIR_CONFIGURED=0
 
-
-# ==========================================================
-# DEFAULT SETTINGS
-# ----------------------------------------------------------
-# These values are fallback defaults and may be overridden
-# by configuration file values.
-# ==========================================================
-
-MODEL="gemini-2.5-flash"
-
-# Number of recent conversational entries retained
-# in the rolling context window.
+FALLBACK_MODEL="gemini-2.5-flash"
+MODEL=""
 HISTORY_LIMIT=12
+AUTOSCAN_TEST_PROMPT="Reply with OK."
+
+USER_NAME="$(whoami)"
+HISTORY=()
+SUMMARY=""
 
 
 # ==========================================================
-# CONFIG FILE LOADING
+# SMALL UTILITY FUNCTIONS
+# ==========================================================
+
+timestamp() {
+  date +"%H:%M:%S"
+}
+
+trim() {
+  printf '%s' "$1" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'
+}
+
+expand_path() {
+  python3 -c 'import os, sys; print(os.path.abspath(os.path.expandvars(os.path.expanduser(sys.argv[1]))))' "$1"
+}
+
+normalize_model_id() {
+  case "$1" in
+    models/*)
+      printf '%s\n' "${1#models/}"
+      ;;
+    *)
+      printf '%s\n' "$1"
+      ;;
+  esac
+}
+
+quote_url_component() {
+  python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$1"
+}
+
+api_key_query() {
+  python3 -c 'import sys, urllib.parse; print(urllib.parse.urlencode({"key": sys.argv[1]}))' "$GEMINI_API_KEY"
+}
+
+models_query() {
+  python3 -c 'import sys, urllib.parse; print(urllib.parse.urlencode({"key": sys.argv[1], "pageSize": "100"}))' "$GEMINI_API_KEY"
+}
+
+effective_model() {
+  if [ -n "$MODEL" ]; then
+    normalize_model_id "$MODEL"
+  else
+    printf '%s\n' "$FALLBACK_MODEL"
+  fi
+}
+
+model_label() {
+  if [ -n "$MODEL" ]; then
+    printf '%s\n' "$(normalize_model_id "$MODEL")"
+  else
+    printf '%s (fallback; no MODEL configured)\n' "$FALLBACK_MODEL"
+  fi
+}
+
+sanitize_session_name() {
+  python3 -c '
+import re
+import sys
+name = sys.argv[1].strip()
+name = re.sub(r"[^A-Za-z0-9._-]+", "_", name)
+name = name.strip("._-")
+print(name or "session")
+' "$1"
+}
+
+
+# ==========================================================
+# CONFIG FILE SUPPORT
 # ----------------------------------------------------------
-# Supported configuration keys:
+# Supported keys:
 #
 #   MODEL
 #   HISTORY_LIMIT
@@ -89,21 +171,33 @@ HISTORY_LIMIT=12
 # Format:
 #   KEY=VALUE
 #
-# Example:
-#
-#   MODEL=gemini-2.5-flash
-#   HISTORY_LIMIT=20
-#   SESSION_DIR=/home/user/history
+# Environment variable GEMINI_API_KEY overrides config file
+# GEMINI_API_KEY.
 # ==========================================================
 
 if [ -f "$CONFIG_FILE" ]; then
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="$(trim "$line")"
 
-  while IFS='=' read -r key value; do
+    case "$line" in
+      ""|\#*)
+        continue
+        ;;
+    esac
+
+    case "$line" in
+      *=*)
+        key="$(trim "${line%%=*}")"
+        value="$(trim "${line#*=}")"
+        ;;
+      *)
+        continue
+        ;;
+    esac
 
     case "$key" in
-
       MODEL)
-        MODEL="$value"
+        MODEL="$(normalize_model_id "$value")"
         ;;
 
       HISTORY_LIMIT)
@@ -115,27 +209,30 @@ if [ -f "$CONFIG_FILE" ]; then
         ;;
 
       SESSION_DIR)
-        SESSION_DIR="$value"
+        SESSION_DIR="$(expand_path "$value")"
         ;;
 
       ATTACHMENT_DIR)
-        ATTACHMENT_DIR="$value"
+        ATTACHMENT_DIR="$(expand_path "$value")"
+        ATTACHMENT_DIR_CONFIGURED=1
         ;;
-
     esac
-
   done < "$CONFIG_FILE"
-
 fi
 
+case "$HISTORY_LIMIT" in
+  ""|*[!0-9]*)
+    HISTORY_LIMIT=12
+    ;;
+esac
 
-# ==========================================================
-# ENSURE STORAGE DIRECTORIES EXIST
-# ----------------------------------------------------------
-# IMPORTANT:
-#   This occurs AFTER config parsing so user-overridden
-#   paths are respected.
-# ==========================================================
+if [ "$HISTORY_LIMIT" -lt 1 ]; then
+  HISTORY_LIMIT=12
+fi
+
+if [ "$ATTACHMENT_DIR_CONFIGURED" -eq 0 ]; then
+  ATTACHMENT_DIR="$SESSION_DIR/attachments"
+fi
 
 mkdir -p "$CONFIG_DIR"
 mkdir -p "$SESSION_DIR"
@@ -143,166 +240,124 @@ mkdir -p "$ATTACHMENT_DIR"
 
 
 # ==========================================================
-# API KEY VALIDATION
+# CONFIG WRITING
 # ----------------------------------------------------------
-# API key priority:
+# Used by:
+#   --set-api-key
+#   --autoscan-model --save
+#   --select-model
 #
-#   1. environment variable
-#   2. config file
-#
-# Environment variables are preferred because they avoid
-# storing secrets in plaintext configuration files.
+# This preserves unrelated config lines where possible and
+# replaces or appends the requested KEY=VALUE pair.
 # ==========================================================
 
-if [ -z "$GEMINI_API_KEY" ]; then
+set_config_value() {
+  local key="$1"
+  local value="$2"
+  local tmp
 
-  echo "ERROR: GEMINI_API_KEY not set"
-  echo ""
-  echo "Set via:"
-  echo "  export GEMINI_API_KEY=your_key"
-  echo ""
-  echo "or inside:"
-  echo "  ~/.config/gemini-cli/config"
+  mkdir -p "$CONFIG_DIR"
+  tmp="$(mktemp "${CONFIG_FILE}.tmp.XXXXXX")"
 
-  exit 1
+  if [ -f "$CONFIG_FILE" ]; then
+    awk -v k="$key" -v v="$value" '
+      BEGIN { done = 0 }
+      $0 ~ "^" k "=" {
+        print k "=" v
+        done = 1
+        next
+      }
+      { print }
+      END {
+        if (!done) {
+          print k "=" v
+        }
+      }
+    ' "$CONFIG_FILE" > "$tmp"
+  else
+    printf '%s=%s\n' "$key" "$value" > "$tmp"
+  fi
 
-fi
-
-
-# ==========================================================
-# GEMINI API ENDPOINT
-# ----------------------------------------------------------
-# Construct endpoint dynamically from selected model.
-#
-# This allows model changes without script modification.
-# ==========================================================
-
-URL="https://generativelanguage.googleapis.com/v1beta/models/$MODEL:generateContent?key=$GEMINI_API_KEY"
-
-
-# ==========================================================
-# RUNTIME VARIABLES
-# ----------------------------------------------------------
-# USER_NAME
-#   Used for terminal display and logging
-#
-# HISTORY
-#   Rolling conversational context window
-#
-# SUMMARY
-#   Placeholder for future summarization system
-# ==========================================================
-
-USER_NAME="$(whoami)"
-
-HISTORY=()
-SUMMARY=""
-
-
-# ==========================================================
-# TIMESTAMP UTILITY
-# ----------------------------------------------------------
-# Standardized timestamp format for:
-#
-#   - prompts
-#   - logs
-#   - status messages
-# ==========================================================
-
-timestamp() {
-  date +"%H:%M:%S"
+  mv "$tmp" "$CONFIG_FILE"
+  chmod 600 "$CONFIG_FILE" 2>/dev/null || true
 }
 
 
 # ==========================================================
-# SESSION UTILITIES
-# ----------------------------------------------------------
-# Session files are stored as:
-#
-#   SESSION_DIR/<name>.log
-#
-# These helper functions centralize session operations.
+# API KEY REQUIREMENT
 # ==========================================================
 
-resolve_session_path() {
-  echo "$SESSION_DIR/$1.log"
-}
+require_api_key() {
+  if [ -z "$GEMINI_API_KEY" ]; then
+    printf '%s\n' "ERROR: GEMINI_API_KEY not set."
+    printf '%s\n' ""
+    printf '%s\n' "Set it with:"
+    printf '%s\n' "  export GEMINI_API_KEY=your_key"
+    printf '%s\n' ""
+    printf '%s\n' "or save it with:"
+    printf '%s\n' "  $PROGRAM --set-api-key"
+    printf '%s\n' ""
+    printf '%s\n' "or put it in:"
+    printf '%s\n' "  $CONFIG_FILE"
+    return 1
+  fi
 
-list_sessions() {
-
-  ls -1 "$SESSION_DIR"/*.log 2>/dev/null \
-    | sed 's#.*/##; s/\.log$##'
-
-  exit 0
+  return 0
 }
 
 
 # ==========================================================
-# VERSION DISPLAY
-# ----------------------------------------------------------
-# Simple machine-readable version output.
-#
-# This becomes important for:
-#   - debugging
-#   - issue reporting
-#   - release tracking
+# HELP AND VERSION
 # ==========================================================
 
 version() {
-
-  echo "gemini-cli version 2.2"
-
-  exit 0
+  printf '%s\n' "$PROGRAM version $VERSION"
 }
 
-
-# ==========================================================
-# BUILT-IN HELP SYSTEM
-# ----------------------------------------------------------
-# Self-documenting command-line usage reference.
-#
-# Supported aliases:
-#
-#   -h
-#   --help
-#   help
-#
-# This avoids forcing users to open:
-#   - README
-#   - man page
-#   - source code
-#
-# for basic operational reminders.
-# ==========================================================
-
 help_menu() {
-
-cat <<EOF
-
-gemini-cli - terminal Gemini interface
+  cat <<EOF
+$PROGRAM - terminal Gemini interface
 
 USAGE
-    gemini-cli
-        Start new timestamped session
+    $PROGRAM
+        Start new timestamped session.
 
-    gemini-cli <name>
-        Start/create named session
+    $PROGRAM <name>
+        Start/create named session.
 
-    gemini-cli --resume <name>
-        Resume named session
+    $PROGRAM --resume <name>
+        Resume named session.
 
-    gemini-cli --list
-        List saved sessions
+    $PROGRAM --list
+        List saved sessions.
 
-    gemini-cli --version
-        Show version information
+    $PROGRAM --models
+        List available Gemini generateContent models.
 
-    gemini-cli --help
-    gemini-cli -h
-        Show this help screen
+    $PROGRAM --autoscan-model
+        Test available models and print the first working model.
+
+    $PROGRAM --autoscan-model --save
+        Test available models, then save the first working MODEL to config.
+
+    $PROGRAM --select-model
+        Show a numbered model list and choose one interactively.
+
+    $PROGRAM --select-model --save
+        Choose a model and save it without asking again.
+
+    $PROGRAM --set-api-key
+        Prompt for a Gemini API key and save it to config.
+
+    $PROGRAM --version
+        Show version information.
+
+    $PROGRAM --help
+    $PROGRAM -h
+        Show this help screen.
 
 CONFIG FILE
-    ~/.config/gemini-cli/config
+    $CONFIG_FILE
 
 SUPPORTED CONFIG KEYS
     MODEL
@@ -311,171 +366,541 @@ SUPPORTED CONFIG KEYS
     SESSION_DIR
     ATTACHMENT_DIR
 
-ATTACHMENT SYSTEM
-    Markdown fenced code blocks returned by Gemini
-    are automatically extracted into attachment files.
+MODEL DISCOVERY
+    Raw Google API command:
+
+        curl "https://generativelanguage.googleapis.com/v1beta/models?key=YOUR_API_KEY"
+
+    Built-in command:
+
+        $PROGRAM --models
+
+MODEL AUTOSCAN
+    Autoscan fetches the live model list, filters to generateContent models,
+    tests candidates with a minimal prompt, and uses the first model that
+    returns valid text.
+
+INPUT
+    Type/paste text, then press Ctrl+D to send.
 
 FILES
-    Session logs:
-        SESSION_DIR
+    Sessions:
+        SESSION_DIR/*.log
 
     Attachments:
-        ATTACHMENT_DIR
+        ATTACHMENT_DIR/
 
 VERSION
-    gemini-cli version 2.2
-
+    $PROGRAM version $VERSION
 EOF
-
-exit 0
 }
 
 
 # ==========================================================
-# ARGUMENT PARSING
+# SESSION MANAGEMENT
+# ==========================================================
+
+resolve_session_path() {
+  printf '%s/%s.log\n' "$SESSION_DIR" "$1"
+}
+
+list_sessions() {
+  local path
+
+  for path in "$SESSION_DIR"/*.log; do
+    [ -e "$path" ] || continue
+    basename "$path" .log
+  done
+}
+
+
+# ==========================================================
+# MODEL LISTING
 # ----------------------------------------------------------
-# Supported modes:
-#
-#   gemini-cli
-#   gemini-cli <name>
-#   gemini-cli --resume <name>
-#   gemini-cli --list
-#   gemini-cli --version
-#   gemini-cli --help
-#
-# CLI STRUCTURE PRINCIPLE
-#   Keep argument behavior explicit and stable.
+# Fetches the live Gemini model list and parses only models
+# that report generateContent support.
 # ==========================================================
 
-case "$1" in
+fetch_models_json() {
+  local url
+  local response
+  local curl_status
 
-  -h|--help|help)
+  require_api_key || return 1
 
-    help_menu
+  url="https://generativelanguage.googleapis.com/v1beta/models?$(models_query)"
 
-    ;;
+  response="$(curl -sS --max-time 60 "$url" 2>&1)"
+  curl_status=$?
 
-  --version)
+  if [ "$curl_status" -ne 0 ]; then
+    printf '%s\n' "curl error while fetching models: $response"
+    return 1
+  fi
 
-    version
+  printf '%s' "$response"
+}
 
-    ;;
+parse_models_table() {
+  python3 -c '
+import json
+import sys
 
-  --list)
+raw = sys.stdin.read()
 
-    list_sessions
+try:
+    data = json.loads(raw)
+except Exception as exc:
+    print(f"ERROR: could not parse model list JSON: {exc}", file=sys.stderr)
+    sys.exit(1)
 
-    ;;
+if "error" in data:
+    err = data["error"]
+    code = err.get("code", "")
+    msg = err.get("message", "")
+    print(f"ERROR: Gemini API error {code}: {msg}", file=sys.stderr)
+    sys.exit(1)
 
-  --resume)
+for item in data.get("models", []):
+    methods = item.get("supportedGenerationMethods", []) or []
+    if "generateContent" not in methods:
+        continue
 
-    SESSION_NAME="$2"
-    SESSION="$(resolve_session_path "$2")"
+    name = item.get("name", "")
+    if name.startswith("models/"):
+        model_id = name.split("/", 1)[1]
+    else:
+        model_id = name
 
-    ;;
+    if not model_id:
+        continue
 
-  "")
+    display = item.get("displayName", model_id)
+    input_limit = item.get("inputTokenLimit", "")
+    output_limit = item.get("outputTokenLimit", "")
 
-    SESSION_NAME="session-$(date +%Y-%m-%d-%H-%M-%S)"
-    SESSION="$SESSION_DIR/$SESSION_NAME.log"
+    print(f"{model_id}\t{display}\t{input_limit}\t{output_limit}")
+'
+}
 
-    ;;
+parse_model_ids() {
+  python3 -c '
+import json
+import sys
 
-  *)
+raw = sys.stdin.read()
 
-    SESSION_NAME="$1"
-    SESSION="$(resolve_session_path "$1")"
+try:
+    data = json.loads(raw)
+except Exception as exc:
+    print(f"ERROR: could not parse model list JSON: {exc}", file=sys.stderr)
+    sys.exit(1)
 
-    ;;
+if "error" in data:
+    err = data["error"]
+    code = err.get("code", "")
+    msg = err.get("message", "")
+    print(f"ERROR: Gemini API error {code}: {msg}", file=sys.stderr)
+    sys.exit(1)
 
-esac
+for item in data.get("models", []):
+    methods = item.get("supportedGenerationMethods", []) or []
+    if "generateContent" not in methods:
+        continue
+
+    name = item.get("name", "")
+    if name.startswith("models/"):
+        model_id = name.split("/", 1)[1]
+    else:
+        model_id = name
+
+    if model_id:
+        print(model_id)
+'
+}
+
+print_models() {
+  local json
+
+  json="$(fetch_models_json)" || return 1
+  printf '%s' "$json" | parse_models_table
+}
 
 
 # ==========================================================
-# STARTUP HEADER
+# JSON PAYLOAD AND RESPONSE PARSING
 # ----------------------------------------------------------
-# Display current runtime information for visibility.
+# Python is used here to avoid fragile shell JSON escaping.
+# This fixes prompts containing quotes, slashes, backslashes,
+# directory paths, and newlines.
 # ==========================================================
 
-echo "gemini-cli"
-echo "session: $SESSION"
-echo "model: $MODEL"
-echo ""
+make_generate_payload() {
+  python3 -c '
+import json
+import sys
+
+text = sys.stdin.read()
+payload = {
+    "contents": [
+        {
+            "parts": [
+                {
+                    "text": text
+                }
+            ]
+        }
+    ]
+}
+
+print(json.dumps(payload))
+'
+}
+
+parse_generate_text() {
+  python3 -c '
+import json
+import sys
+
+raw = sys.stdin.read()
+
+try:
+    data = json.loads(raw)
+except Exception as exc:
+    print(f"invalid JSON response: {exc}; raw response: {raw[:1000]}")
+    sys.exit(1)
+
+if "error" in data:
+    err = data["error"]
+    code = err.get("code", "")
+    msg = err.get("message", "")
+    print(f"Gemini API error {code}: {msg}")
+    sys.exit(1)
+
+try:
+    text = data["candidates"][0]["content"]["parts"][0]["text"]
+except Exception as exc:
+    print(f"unexpected response structure: {exc}; raw response: {raw[:1000]}")
+    sys.exit(1)
+
+if not text.strip():
+    print("Gemini returned an empty text response")
+    sys.exit(1)
+
+print(text)
+'
+}
+
+call_gemini_model() {
+  local model="$1"
+  local prompt="$2"
+  local timeout="${3:-120}"
+  local clean_model
+  local quoted_model
+  local url
+  local response
+  local curl_status
+  local output
+  local parse_status
+
+  require_api_key || return 1
+
+  clean_model="$(normalize_model_id "$model")"
+  quoted_model="$(quote_url_component "$clean_model")"
+  url="https://generativelanguage.googleapis.com/v1beta/models/$quoted_model:generateContent?$(api_key_query)"
+
+  response="$(
+    printf '%s' "$prompt" \
+      | make_generate_payload \
+      | curl -sS --max-time "$timeout" \
+          -H "Content-Type: application/json" \
+          -d @- \
+          "$url" 2>&1
+  )"
+
+  curl_status=$?
+
+  if [ "$curl_status" -ne 0 ]; then
+    printf '%s\n' "curl error: $response"
+    return 1
+  fi
+
+  output="$(printf '%s' "$response" | parse_generate_text)"
+  parse_status=$?
+
+  printf '%s\n' "$output"
+  return "$parse_status"
+}
+
+
+# ==========================================================
+# MODEL AUTOSCAN
+# ----------------------------------------------------------
+# This avoids guessing future Google model names.
+#
+# Autoscan:
+#   1. Fetches the live model list.
+#   2. Filters to generateContent models.
+#   3. Tests each with a tiny prompt.
+#   4. Prints the first model that returns valid text.
+# ==========================================================
+
+autoscan_model() {
+  local json
+  local ids_text
+  local model
+  local total
+  local i
+  local output
+  local status
+  local last_error=""
+
+  json="$(fetch_models_json)" || return 1
+  ids_text="$(printf '%s' "$json" | parse_model_ids)" || return 1
+
+  if [ -z "$ids_text" ]; then
+    printf '%s\n' "No generateContent-compatible models were returned by the API."
+    return 1
+  fi
+
+  mapfile -t MODEL_IDS <<< "$ids_text"
+  total="${#MODEL_IDS[@]}"
+  i=0
+
+  for model in "${MODEL_IDS[@]}"; do
+    i=$((i + 1))
+    printf 'testing %s/%s: %s\n' "$i" "$total" "$model" >&2
+
+    output="$(call_gemini_model "$model" "$AUTOSCAN_TEST_PROMPT" 45)"
+    status=$?
+
+    if [ "$status" -eq 0 ] && [ -n "$output" ]; then
+      printf '%s\n' "$model"
+      return 0
+    fi
+
+    last_error="$output"
+  done
+
+  printf '%s\n' "No tested model returned valid text. Last error: $last_error"
+  return 1
+}
+
+autoscan_command() {
+  local selected
+  local status
+
+  selected="$(autoscan_model)"
+  status=$?
+
+  if [ "$status" -ne 0 ]; then
+    printf '%s\n' "$selected" >&2
+    return 1
+  fi
+
+  printf '%s\n' "$selected"
+
+  if [ "$SAVE" -eq 1 ]; then
+    set_config_value "MODEL" "$selected"
+    printf 'saved MODEL=%s to %s\n' "$selected" "$CONFIG_FILE" >&2
+  else
+    printf '%s\n' "" >&2
+    printf '%s\n' "To save this model:" >&2
+    printf '  %s --autoscan-model --save\n' "$PROGRAM" >&2
+  fi
+}
+
+
+# ==========================================================
+# NUMBERED MODEL SELECTION
+# ----------------------------------------------------------
+# This is the Bash version of model selection. It stays
+# line-oriented: print a numbered list, read a number, save
+# if requested or confirmed.
+# ==========================================================
+
+select_model_command() {
+  local json
+  local table
+  local line
+  local index
+  local choice
+  local selected_line
+  local selected_model
+  local display
+  local input_limit
+  local output_limit
+  local answer
+
+  json="$(fetch_models_json)" || return 1
+  table="$(printf '%s' "$json" | parse_models_table)" || return 1
+
+  if [ -z "$table" ]; then
+    printf '%s\n' "No generateContent-compatible models were returned by the API."
+    return 1
+  fi
+
+  mapfile -t MODEL_LINES <<< "$table"
+
+  printf '%s\n' "Available generateContent models:"
+  printf '%s\n' ""
+
+  index=1
+  for line in "${MODEL_LINES[@]}"; do
+    IFS=$'\t' read -r selected_model display input_limit output_limit <<< "$line"
+
+    if [ -n "$input_limit" ] || [ -n "$output_limit" ]; then
+      printf '%3d) %s - %s (input:%s output:%s)\n' \
+        "$index" "$selected_model" "$display" "${input_limit:-?}" "${output_limit:-?}"
+    else
+      printf '%3d) %s - %s\n' "$index" "$selected_model" "$display"
+    fi
+
+    index=$((index + 1))
+  done
+
+  printf '%s\n' ""
+  printf 'Select model number: '
+  IFS= read -r choice
+
+  case "$choice" in
+    ""|*[!0-9]*)
+      printf '%s\n' "Invalid selection."
+      return 1
+      ;;
+  esac
+
+  if [ "$choice" -lt 1 ] || [ "$choice" -gt "${#MODEL_LINES[@]}" ]; then
+    printf '%s\n' "Selection out of range."
+    return 1
+  fi
+
+  selected_line="${MODEL_LINES[$((choice - 1))]}"
+  IFS=$'\t' read -r selected_model display input_limit output_limit <<< "$selected_line"
+
+  printf 'Selected model: %s\n' "$selected_model"
+
+  if [ "$SAVE" -eq 1 ]; then
+    set_config_value "MODEL" "$selected_model"
+    printf 'saved MODEL=%s to %s\n' "$selected_model" "$CONFIG_FILE"
+    return 0
+  fi
+
+  printf 'Save MODEL=%s to config? [y/N] ' "$selected_model"
+  IFS= read -r answer
+
+  case "$answer" in
+    y|Y|yes|YES)
+      set_config_value "MODEL" "$selected_model"
+      printf 'saved MODEL=%s to %s\n' "$selected_model" "$CONFIG_FILE"
+      ;;
+    *)
+      printf '%s\n' "Model not saved. To save without prompting:"
+      printf '  %s --select-model --save\n' "$PROGRAM"
+      ;;
+  esac
+}
+
+
+# ==========================================================
+# API KEY SETUP
+# ----------------------------------------------------------
+# This stores GEMINI_API_KEY in the config file.
+# It is convenient, but less secure than using an environment
+# variable.
+# ==========================================================
+
+set_api_key_command() {
+  local answer
+  local key
+
+  printf '%s\n' "This will save GEMINI_API_KEY in plaintext:"
+  printf '  %s\n' "$CONFIG_FILE"
+  printf '%s\n' ""
+  printf '%s\n' "The file will be chmod 0600 where possible."
+  printf '%s\n' ""
+  printf 'Continue? [y/N] '
+  IFS= read -r answer
+
+  case "$answer" in
+    y|Y|yes|YES)
+      ;;
+    *)
+      printf '%s\n' "Cancelled."
+      return 1
+      ;;
+  esac
+
+  printf 'Paste Gemini API key: '
+  IFS= read -r -s key
+  printf '%s\n' ""
+
+  if [ -z "$key" ]; then
+    printf '%s\n' "No key entered."
+    return 1
+  fi
+
+  set_config_value "GEMINI_API_KEY" "$key"
+  printf 'saved GEMINI_API_KEY to %s\n' "$CONFIG_FILE"
+}
 
 
 # ==========================================================
 # MEMORY SYSTEM
 # ----------------------------------------------------------
-# Lightweight rolling conversational memory.
-#
-# Avoids:
-#   - uncontrolled token growth
-#   - replaying entire logs every request
-#   - massive API payloads
+# Lightweight rolling memory. This is not full transcript
+# replay. It keeps the last HISTORY_LIMIT entries in context.
 # ==========================================================
 
 add_to_history() {
-
   HISTORY+=("$1")
 
-  if [ "${#HISTORY[@]}" -gt "$HISTORY_LIMIT" ]; then
-    HISTORY=("${HISTORY[@]: -6}")
-  fi
+  while [ "${#HISTORY[@]}" -gt "$HISTORY_LIMIT" ]; do
+    HISTORY=("${HISTORY[@]:1}")
+  done
 }
 
 build_context() {
-
-  context="$SUMMARY\n"
+  local context="$SUMMARY"
+  local msg
 
   for msg in "${HISTORY[@]}"; do
-    context="$context$msg\n"
+    if [ -n "$context" ]; then
+      context="${context}"$'\n'"$msg"
+    else
+      context="$msg"
+    fi
   done
 
-  printf "%s" "$context"
+  printf '%s' "$context"
 }
 
 
 # ==========================================================
 # ATTACHMENT EXTRACTION SYSTEM
 # ----------------------------------------------------------
-# Detect fenced markdown code blocks and:
+# Fenced markdown code blocks are removed from terminal
+# output and saved into ATTACHMENT_DIR.
 #
-#   - save them into ATTACHMENT_DIR
-#   - remove them from displayed terminal output
-#   - replace them with attachment notices
-#
-# IMPORTANT DESIGN DECISION
-#   Session logs preserve FULL raw Gemini output.
-#
-# Only terminal display is cleaned.
+# The raw full Gemini response remains in the session log.
 # ==========================================================
 
 extract_attachments() {
-
-python3 - "$ATTACHMENT_DIR" "$SESSION_NAME" <<'PYTHON'
-
+  python3 -c '
 import os
 import re
 import sys
 
 attachment_dir = sys.argv[1]
 session_name = sys.argv[2]
-
 text = sys.stdin.read()
-
-
-# ==========================================================
-# LANGUAGE -> EXTENSION MAP
-# ----------------------------------------------------------
-# Determines attachment file extension based on markdown
-# fence language identifier.
-# ==========================================================
 
 ext_map = {
     "bash": ".sh",
     "sh": ".sh",
     "shell": ".sh",
     "python": ".py",
+    "py": ".py",
     "json": ".json",
     "yaml": ".yml",
     "yml": ".yml",
@@ -484,241 +909,266 @@ ext_map = {
     "html": ".html",
     "css": ".css",
     "sql": ".sql",
-    "text": ".txt"
+    "c": ".c",
+    "cpp": ".cpp",
+    "c++": ".cpp",
+    "text": ".txt",
 }
 
+pattern = re.compile(r"```([A-Za-z0-9_+.#-]*)[ \t]*\n(.*?)```", re.DOTALL)
 
-# ==========================================================
-# ATTACHMENT COUNTER
-# ----------------------------------------------------------
-# Generates filenames like:
-#
-#   mychat-python-01.py
-#   mychat-bash-02.sh
-# ==========================================================
+def safe_tag(lang):
+    lang = (lang or "text").strip().lower()
+    lang = lang.replace("+", "p").replace("#", "sharp")
+    lang = re.sub(r"[^A-Za-z0-9._-]+", "_", lang)
+    return lang or "text"
 
-counter = 1
-
-
-# ==========================================================
-# MARKDOWN CODE BLOCK DETECTION
-# ----------------------------------------------------------
-# Matches fenced markdown blocks:
-#
-#   ```python
-#   print("hello")
-#   ```
-# ==========================================================
-
-pattern = re.compile(
-    r"```([a-zA-Z0-9_-]*)\n(.*?)```",
-    re.DOTALL
-)
-
-
-# ==========================================================
-# REPLACEMENT FUNCTION
-# ----------------------------------------------------------
-# Saves extracted code into attachment files and returns
-# placeholder text for terminal display.
-# ==========================================================
-
-def replacement(match):
-
-    global counter
-
-    lang = match.group(1).strip().lower()
-    content = match.group(2)
-
-    if not lang:
-        lang = "text"
-
-    ext = ext_map.get(lang, ".txt")
-
-    filename = (
-        f"{session_name}-"
-        f"{lang}-"
-        f"{counter:02d}"
-        f"{ext}"
+def next_number(lang, ext):
+    highest = 0
+    regex = re.compile(
+        r"^" + re.escape(session_name) + "-" + re.escape(lang) + r"-(\d{2,})" + re.escape(ext) + r"$"
     )
 
+    if os.path.isdir(attachment_dir):
+        for name in os.listdir(attachment_dir):
+            match = regex.match(name)
+            if match:
+                highest = max(highest, int(match.group(1)))
+
+    return highest + 1
+
+def replacement(match):
+    raw_lang = (match.group(1) or "text").strip().lower()
+    lang = safe_tag(raw_lang)
+    content = match.group(2)
+    ext = ext_map.get(raw_lang, ext_map.get(lang, ".txt"))
+    number = next_number(lang, ext)
+
+    filename = f"{session_name}-{lang}-{number:02d}{ext}"
     path = os.path.join(attachment_dir, filename)
 
-    with open(path, "w") as f:
-        f.write(content)
+    os.makedirs(attachment_dir, exist_ok=True)
 
-    counter += 1
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(content)
 
     return (
-        f"\n"
-        f"[attachment saved]\n"
+        "\n"
+        "[attachment saved]\n"
         f"file: {filename}\n"
         f"location: {attachment_dir}\n"
     )
 
-
-# ==========================================================
-# PROCESS GEMINI OUTPUT
-# ==========================================================
-
-cleaned = pattern.sub(replacement, text)
-
-print(cleaned)
-
-PYTHON
-
+print(pattern.sub(replacement, text))
+' "$ATTACHMENT_DIR" "$SESSION_NAME"
 }
 
 
 # ==========================================================
+# ARGUMENT PARSING
+# ==========================================================
+
+ACTION="chat"
+SAVE=0
+SESSION_NAME=""
+RESUME=0
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -h|--help|help)
+      ACTION="help"
+      ;;
+
+    --version)
+      ACTION="version"
+      ;;
+
+    --list)
+      ACTION="list"
+      ;;
+
+    --models)
+      ACTION="models"
+      ;;
+
+    --autoscan-model)
+      ACTION="autoscan"
+      ;;
+
+    --select-model)
+      ACTION="select"
+      ;;
+
+    --set-api-key)
+      ACTION="set-api-key"
+      ;;
+
+    --save)
+      SAVE=1
+      ;;
+
+    --resume)
+      RESUME=1
+      shift
+
+      if [ -z "${1:-}" ]; then
+        printf '%s\n' "ERROR: --resume requires a session name." >&2
+        exit 2
+      fi
+
+      SESSION_NAME="$1"
+      ;;
+
+    --)
+      shift
+      break
+      ;;
+
+    -*)
+      printf 'ERROR: unknown option: %s\n' "$1" >&2
+      exit 2
+      ;;
+
+    *)
+      if [ "$ACTION" = "chat" ] && [ -z "$SESSION_NAME" ]; then
+        SESSION_NAME="$1"
+      else
+        printf 'ERROR: unexpected argument: %s\n' "$1" >&2
+        exit 2
+      fi
+      ;;
+  esac
+
+  shift
+done
+
+case "$ACTION" in
+  help)
+    help_menu
+    exit 0
+    ;;
+
+  version)
+    version
+    exit 0
+    ;;
+
+  list)
+    list_sessions
+    exit 0
+    ;;
+
+  models)
+    print_models
+    exit $?
+    ;;
+
+  autoscan)
+    autoscan_command
+    exit $?
+    ;;
+
+  select)
+    select_model_command
+    exit $?
+    ;;
+
+  set-api-key)
+    set_api_key_command
+    exit $?
+    ;;
+esac
+
+if [ "$SAVE" -eq 1 ]; then
+  printf '%s\n' "ERROR: --save is only valid with --autoscan-model or --select-model." >&2
+  exit 2
+fi
+
+
+# ==========================================================
+# CHAT SESSION SETUP
+# ==========================================================
+
+require_api_key || exit 1
+
+if [ -z "$SESSION_NAME" ]; then
+  SESSION_NAME="session-$(date +%Y-%m-%d-%H-%M-%S)"
+else
+  SESSION_NAME="$(sanitize_session_name "$SESSION_NAME")"
+fi
+
+SESSION="$(resolve_session_path "$SESSION_NAME")"
+
+if [ "$RESUME" -eq 1 ] && [ ! -f "$SESSION" ]; then
+  printf 'ERROR: session not found: %s\n' "$SESSION_NAME" >&2
+  exit 1
+fi
+
+ACTIVE_MODEL="$(effective_model)"
+
+printf '%s\n' "$PROGRAM"
+printf 'session: %s\n' "$SESSION"
+printf 'model: %s\n' "$(model_label)"
+printf '%s\n' "Ctrl+D to send message, Ctrl+C to exit"
+printf '%s\n' ""
+
+if [ -z "$MODEL" ]; then
+  printf '%s\n' "No MODEL configured. Using fallback model."
+  printf '%s\n' "To find and save a working model:"
+  printf '  %s --autoscan-model --save\n' "$PROGRAM"
+  printf '%s\n' ""
+fi
+
+
+# ==========================================================
 # MAIN CHAT LOOP
-# ----------------------------------------------------------
-# Core runtime loop:
-#
-#   1. receive user input
-#   2. log input
-#   3. build conversational context
-#   4. call Gemini API
-#   5. extract attachments
-#   6. display cleaned output
-#   7. update rolling memory
 # ==========================================================
 
 while true; do
-
   TS="$(timestamp)"
 
+  printf '[%s] %s> ' "$TS" "$USER_NAME"
 
-  # ========================================================
-  # USER INPUT
-  # --------------------------------------------------------
-  # Uses stdin-based multiline input.
-  #
-  # Input ends when stdin closes (Ctrl+D).
-  # ========================================================
-
-  printf "[%s] %s> " "$TS" "$USER_NAME"
-
-  buffer=$(cat)
+  buffer="$(cat)"
 
   [ -z "$buffer" ] && continue
 
-
-  # ========================================================
-  # LOG USER INPUT
-  # ========================================================
-
-  printf "[%s] %s: %s\n" \
-    "$TS" \
-    "$USER_NAME" \
-    "$buffer" >> "$SESSION"
+  printf '[%s] %s: %s\n' "$TS" "$USER_NAME" "$buffer" >> "$SESSION"
 
   add_to_history "User: $buffer"
 
+  printf '%s\n' ""
+  printf '%s\n' "________________________________________"
+  printf '%s\n' "END INPUT"
+  printf '%s\n' "________________________________________"
+  printf '[%s] Generating response...\n' "$(timestamp)"
+  printf '%s\n' "________________________________________"
+  printf '%s\n' "BEGIN OUTPUT"
+  printf '%s\n' "________________________________________"
+  printf '%s\n' ""
 
-  # ========================================================
-  # VISUAL SEPARATORS
-  # --------------------------------------------------------
-  # Improves readability during long conversations.
-  # ========================================================
+  context="$(build_context)"
 
-  printf "\n________________________________________\n"
-  printf "END INPUT\n"
-  printf "________________________________________\n"
+  if [ -n "$context" ]; then
+    prompt_text="${context}"$'\n'"User: $buffer"
+  else
+    prompt_text="User: $buffer"
+  fi
 
-  printf "[%s] Generating response...\n" "$(timestamp)"
+  output="$(call_gemini_model "$ACTIVE_MODEL" "$prompt_text" 120)"
+  output_status=$?
 
-  printf "________________________________________\n"
-  printf "BEGIN OUTPUT\n"
-  printf "________________________________________\n\n"
+  if [ "$output_status" -ne 0 ]; then
+    output="(response error: $output)"
+  fi
 
+  [ -z "$output" ] && output="(empty response or API error)"
 
-  # ========================================================
-  # BUILD CONTEXT
-  # ========================================================
+  printf '[%s] Gemini: %s\n' "$(timestamp)" "$output" >> "$SESSION"
 
-  context=$(build_context)
-
-
-  # ========================================================
-  # GEMINI API REQUEST
-  # --------------------------------------------------------
-  # Sends conversational context to Gemini REST API.
-  #
-  # Dependency strategy:
-  #   Use curl directly to minimize stack complexity.
-  # ========================================================
-
-  response=$(curl -s "$URL" \
-    -H "Content-Type: application/json" \
-    -d "{\"contents\":[{\"parts\":[{\"text\":\"$context\nUser: $buffer\"}]}]}")
-
-
-  # ========================================================
-  # JSON RESPONSE PARSING
-  # --------------------------------------------------------
-  # Python is used instead of jq to:
-  #
-  #   - reduce dependency requirements
-  #   - avoid shell JSON parsing fragility
-  # ========================================================
-
-  output=$(printf '%s' "$response" | python3 -c '
-
-import sys
-import json
-
-d = json.load(sys.stdin)
-
-print(
-  d["candidates"][0]
-   ["content"]["parts"][0]["text"]
-)
-
-')
-
-
-  # ========================================================
-  # SAFETY FALLBACK
-  # --------------------------------------------------------
-  # Prevent empty terminal output on malformed responses.
-  # ========================================================
-
-  [ -z "$output" ] && \
-    output="(empty response or API error)"
-
-
-  # ========================================================
-  # STORE RAW RESPONSE
-  # --------------------------------------------------------
-  # Preserve original FULL Gemini output in session logs.
-  #
-  # Logs remain authoritative archival history.
-  # ========================================================
-
-  printf "[%s] Gemini: %s\n" \
-    "$(timestamp)" \
-    "$output" >> "$SESSION"
-
-
-  # ========================================================
-  # ATTACHMENT EXTRACTION PIPELINE
-  # ========================================================
-
-  cleaned_output=$(printf '%s' "$output" | extract_attachments)
-
-
-  # ========================================================
-  # MEMORY UPDATE
-  # ========================================================
+  cleaned_output="$(printf '%s' "$output" | extract_attachments)"
 
   add_to_history "Assistant: $cleaned_output"
 
-
-  # ========================================================
-  # DISPLAY CLEANED OUTPUT
-  # ========================================================
-
-  printf "%s\n\n" "$cleaned_output"
-
+  printf '%s\n\n' "$cleaned_output"
 done
