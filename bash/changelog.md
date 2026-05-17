@@ -1,4 +1,47 @@
 # Changelog
+## 2.4
+
+### Added
+- `CONTEXT_TURNS` config key for clearer conversation-memory terminology
+- Backward compatibility for legacy `HISTORY_LIMIT` config key
+- Resume-time context rebuild from session logs
+- Context rebuild for existing named sessions
+- Autoscan challenge validation
+- Default autoscan prompt: `What is the capital of Texas?`
+- Default autoscan expected substring: `austin`
+- `AUTOSCAN_PROMPT` config key
+- `AUTOSCAN_EXPECTED` config key
+- Autoscan failure reporting when a model returns text but fails the expected-answer check
+- Startup display of active context-turn count
+- Startup display of loaded context-entry count when an existing session log is used
+
+### Changed
+- Autoscan no longer accepts any non-empty text response as success
+- Autoscan now requires the response to contain the expected answer substring
+- Internal memory variable terminology shifted from history-style wording to context-buffer wording
+- `CONTEXT_TURNS` now represents user/assistant exchanges rather than individual speaker entries
+- Resume memory rebuild keeps up to `CONTEXT_TURNS * 2` speaker entries from the session log
+- Existing named sessions now regain recent conversation context instead of only continuing the log
+- Help output now documents `CONTEXT_TURNS`, `AUTOSCAN_PROMPT`, and `AUTOSCAN_EXPECTED`
+- Man page now describes `HISTORY_LIMIT` as a legacy alias instead of the preferred setting
+
+### Documentation
+- Updated CONFIGURATION section with `CONTEXT_TURNS`
+- Documented legacy `HISTORY_LIMIT`
+- Added autoscan challenge details
+- Documented `AUTOSCAN_PROMPT`
+- Documented `AUTOSCAN_EXPECTED`
+- Updated MEMORY MODEL section
+- Updated MODEL AUTOSCAN section
+- Updated SESSION MANAGEMENT section
+- Updated LIMITATIONS section to clarify autoscan verifies only the configured challenge
+
+### Notes
+- This brings the Bash edition into closer memory parity with the ncurses edition.
+- The Bash version remains intentionally line-oriented and does not attempt to imitate ncurses UI behavior.
+- The autoscan challenge is empirical and configurable.
+- The default Texas/Austin challenge reduces false positives from models that merely return any non-empty text.
+
 ## 2.3
 
 ### Added
