@@ -1,4 +1,50 @@
 # Changelog
+## 0.6.1
+
+### Added
+- Low-resolution-safe compact main footer
+- Full-screen F1 command menu behavior through scrollable help page
+- Full-screen scrollable message/error pages
+- Temporary startup transcript notice from `remfan1994` in new blank sessions
+- Automatic removal of the startup notice when the first user message is sent
+- Input-box placeholder text: `Type your chat message here...`
+- `MONOCHROME` config key
+- `INPUT_PLACEHOLDER` config key
+- `STARTUP_NOTICE` config key
+- Dim/grey styling for user transcript messages in normal display mode
+- Normal/white styling for Gemini transcript output and typed input text
+- Documentation for display behavior and low-resolution behavior
+
+### Changed
+- Main status/footer no longer tries to display every F-key command on one line
+- Help, credits, and error messages no longer use clipping-prone small modals
+- Long credits text and Project Lead notice now wrap in a scrollable full-screen page
+- The Project Lead notice is now primarily presented as a temporary chat-window transcript item, not only as credits text
+- User transcript messages are visually distinguished from Gemini output when monochrome mode is disabled
+- Input placeholder is visual only and is never sent to Gemini
+- Startup notice is not logged, not stored in memory, and not sent to Gemini
+- Menu/error display now owns the screen instead of sharing space with the main status line
+
+### Fixed
+- F-key help text being cut off on low-resolution terminals
+- Credits notice being clipped before the full Project Lead warning could be read
+- Error/status messages visually colliding with menus
+- Model-list/network error pages becoming hard to recover from on small displays
+
+### Documentation
+- Added DISPLAY AND LOW-RESOLUTION BEHAVIOR section to the man page
+- Documented `MONOCHROME`
+- Documented `INPUT_PLACEHOLDER`
+- Documented `STARTUP_NOTICE`
+- Documented the temporary startup notice behavior
+- Documented that the startup notice is not logged or sent to Gemini
+- Updated limitations for very small terminals
+
+### Notes
+- Drag selection remains intentionally delegated to the terminal emulator.
+- Mousewheel scrolling and click interactions remain in-app behaviors.
+- This is a UI stability and readability release, not an API/transport release.
+
 ## 0.6.0
 
 ### Added
