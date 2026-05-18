@@ -9,8 +9,8 @@ SYNOPSIS
     gemini-cli --resume <session_name>
     gemini-cli --list
     gemini-cli --models
-    gemini-cli --autoscan-model
-    gemini-cli --autoscan-model --save
+    gemini-cli --test-model <model_id>
+    gemini-cli --test-model <model_id> --save
     gemini-cli --select-model
     gemini-cli --select-model --save
     gemini-cli --set-api-key
@@ -32,10 +32,12 @@ DESCRIPTION
         - timestamped logs
         - rolling conversation context
         - resume-time context rebuild from session logs
+        - context snapshots stored in session logs
+        - temporary Project Lead startup notice for new blank sessions
         - config file support
         - automatic code attachment extraction
         - model listing
-        - model autoscan
+        - user-operated model testing
         - numbered model selection
         - API-key setup helper
 
@@ -43,7 +45,8 @@ USAGE
     First-time setup:
 
         gemini-cli --set-api-key
-        gemini-cli --autoscan-model --save
+        gemini-cli --models
+        gemini-cli --select-model
 
     Start a normal timestamped chat:
 
@@ -65,13 +68,17 @@ USAGE
 
         gemini-cli --models
 
+    Test one model:
+
+        gemini-cli --test-model gemini-2.5-flash
+
+    Test one model and save it if successful:
+
+        gemini-cli --test-model gemini-2.5-flash --save
+
     Choose a model manually:
 
         gemini-cli --select-model
-
-    Find and save the first working model automatically:
-
-        gemini-cli --autoscan-model --save
 
 SESSION MANAGEMENT
     gemini-cli
@@ -98,6 +105,31 @@ INPUT
 
     Ctrl+C exits the running chat.
 
+STARTUP NOTICE
+    In a new blank session, gemini-cli can display a temporary transcript-style
+    Project Lead notice from remfan1994.
+
+    Notice text:
+
+        I strongly encourage everyone to get cruetly-free VEGETARIAN food and
+        remember the 'bloodguilt' curse from the Bible.  -Project Lead,
+        remfan1994
+
+    Behavior:
+        - shown only in new blank sessions
+        - removed from the visible terminal when the first message is sent
+        - not written to the session log
+        - not sent to Gemini
+        - not stored in conversation memory
+
+    Config key:
+
+        STARTUP_NOTICE=1
+
+    Disable with:
+
+        STARTUP_NOTICE=0
+
 MODEL DISCOVERY
     Available Gemini models can be listed with:
 
@@ -110,37 +142,34 @@ MODEL DISCOVERY
     gemini-cli filters the returned list to models that report
     generateContent support.
 
-MODEL AUTOSCAN
-    Autoscan is intended for users who do not know which model to choose.
+MODEL TESTING
+    Autoscan has been removed from the Bash version.
+
+    Instead of probing every available model, gemini-cli tests only a
+    user-selected model.
 
     From the shell:
 
+        gemini-cli --test-model <model_id>
+
+    Example:
+
+        gemini-cli --test-model gemini-2.5-flash
+
+    The tester sends MODEL_TEST_PROMPT to the selected model and prints the
+    raw response. The user reads the response and decides whether the model is
+    useful.
+
+    To save a model after a successful test:
+
+        gemini-cli --test-model <model_id> --save
+
+    The removed autoscan command:
+
         gemini-cli --autoscan-model
 
-    Autoscan performs the following steps:
-
-        1. Fetch the live Gemini model list.
-        2. Filter to models that support generateContent.
-        3. Test each candidate with the autoscan challenge.
-        4. Print the first model that returns text containing the expected
-           answer substring.
-
-    Default autoscan challenge:
-
-        Prompt:
-            What is the capital of Texas?
-
-        Expected substring:
-            austin
-
-    Autoscan does not guarantee the best model. It only finds a functional
-    text-generation model available to the current API key.
-
-    Autoscan may consume multiple API calls.
-
-    To save the result:
-
-        gemini-cli --autoscan-model --save
+    now exits with an explanation and points users toward --models,
+    --test-model, and --select-model.
 
 MODEL SELECTION
     A numbered model selection menu is available:
@@ -148,7 +177,8 @@ MODEL SELECTION
         gemini-cli --select-model
 
     The tool prints available generateContent models, asks the user to choose
-    a number, then offers to save the chosen MODEL value to the config file.
+    a number, offers to test the selected model, then offers to save the chosen
+    MODEL value to the config file.
 
     To save without a second confirmation prompt:
 
@@ -164,10 +194,8 @@ MODEL FALLBACK
     This is not a permanent recommendation and not a guarantee that the model
     will always be available. Users should prefer:
 
-        gemini-cli --autoscan-model --save
-
-    or:
-
+        gemini-cli --models
+        gemini-cli --test-model <model_id>
         gemini-cli --select-model
 
     to choose a currently available model.
@@ -223,13 +251,19 @@ CONFIGURATION
             Directory used for extracted code artifacts.
             Default: SESSION_DIR/attachments
 
-        AUTOSCAN_PROMPT
-            Prompt used when testing candidate models during autoscan.
-            Default: What is the capital of Texas?
+        MODEL_TEST_PROMPT
+            Prompt used by --test-model and --select-model model testing.
 
-        AUTOSCAN_EXPECTED
-            Case-insensitive substring required in the autoscan response.
-            Default: austin
+        STARTUP_NOTICE
+            Controls whether the temporary remfan1994 Project Lead notice is
+            displayed in new blank sessions.
+
+            Values:
+                1, yes, y, true, on
+                    enabled
+
+                0, no, false, off
+                    disabled
 
 ENVIRONMENT
     GEMINI_API_KEY
@@ -277,8 +311,12 @@ MEMORY MODEL
     CONTEXT_TURNS controls how many recent user/assistant exchanges are sent
     back to Gemini with each request.
 
-    When resuming an existing session, the Bash version now rebuilds recent
-    context from the session log.
+    When resuming an existing session, gemini-cli rebuilds recent context from
+    the session log.
+
+    The Bash version now stores explicit context snapshots in the session log.
+    When rebuilding context, it prefers the latest saved snapshot and falls
+    back to recent chat entries if no snapshot exists.
 
     The session log remains the permanent archive. The context buffer is only
     the recent window sent back to Gemini.
@@ -289,13 +327,15 @@ LIMITATIONS
     - Requires python3
     - Requires internet access
     - API quota restrictions apply
-    - Autoscan may consume multiple API calls
-    - Autoscan only verifies the configured challenge, not overall model quality
     - Basic terminal input only; no ncurses-style editing
     - Ctrl+D is used to send multiline input
+    - The Project Lead startup notice can only be removed visually by clearing
+      the terminal screen after the first message is sent
+    - --test-model verifies only one selected model and does not guarantee
+      overall model quality
 
 VERSION
-    gemini-cli version 2.4
+    gemini-cli version 2.5
 
 AUTHOR
-    Part of the gemini-terminal-tools project
+    Part of the gemini-terminal-tools project.
