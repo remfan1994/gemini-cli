@@ -12,11 +12,16 @@ interactive input problems that are difficult to solve cleanly in shell.
 from __future__ import annotations
 
 import argparse
+import base64
 import curses
 import json
+import mimetypes
 import os
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 import textwrap
 import urllib.error
 import urllib.parse
@@ -26,12 +31,20 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 PROGRAM = "gemini-curses"
 FALLBACK_MODEL = "gemini-2.5-flash"
-DEFAULT_AUTOSCAN_PROMPT = "What is the capital of Texas?"
-DEFAULT_AUTOSCAN_EXPECTED = "austin"
+PROJECT_URL = "https://github.com/remfan1994/gemini-terminal-tools"
+PROJECT_NOTICE = (
+    "I strongly encourage everyone to get cruetly-free VEGETARIAN food and "
+    "remember the 'bloodguilt' curse from the Bible.  -Project Lead, remfan1994"
+)
 MOUSE_SCROLL_LINES = 3
+DEFAULT_MODEL_TEST_PROMPT = (
+    "Please reply with a short sentence confirming this model is available "
+    "for text generation."
+)
+DEFAULT_MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
 
 
 # ---------------------------------------------------------------------------
@@ -46,11 +59,10 @@ MOUSE_SCROLL_LINES = 3
 #     curl "https://generativelanguage.googleapis.com/v1beta/models?key=YOUR_API_KEY"
 #   This program also exposes that through --models and the in-app F2 selector.
 #
-# Model autoscan note:
-#   Because Google's model list can change, gemini-curses does not try to know
-#   the permanent "best" model. The F4/--autoscan-model feature fetches the live
-#   model list, tests generateContent-compatible models with a small factual
-#   challenge, and activates the first model that returns the expected answer.
+# Model testing note:
+#   Autoscan has been removed. The safer workflow is user-operated testing:
+#   select one model, send one clearly documented test request, read the raw
+#   response, then activate/save the model only if the user accepts it.
 #
 # Memory terminology note:
 #   CONTEXT_TURNS is the preferred config key. It means recent user/assistant
@@ -61,16 +73,14 @@ MOUSE_SCROLL_LINES = 3
 
 @dataclass
 class Config:
-    # Empty string means no explicit MODEL was configured. In that case the
-    # program can still use FALLBACK_MODEL, but the UI labels it as a fallback,
-    # not as a permanent recommendation.
     model: str = ""
     context_turns: int = 12
     api_key: str = ""
     session_dir: Path = field(default_factory=lambda: Path.home() / ".gpt")
     attachment_dir: Optional[Path] = None
-    autoscan_prompt: str = DEFAULT_AUTOSCAN_PROMPT
-    autoscan_expected: str = DEFAULT_AUTOSCAN_EXPECTED
+    editor: str = ""
+    model_test_prompt: str = DEFAULT_MODEL_TEST_PROMPT
+    max_attachment_bytes: int = DEFAULT_MAX_ATTACHMENT_BYTES
     config_file: Path = field(
         default_factory=lambda: Path.home() / ".config" / "gemini-cli" / "config"
     )
@@ -85,14 +95,18 @@ class Config:
             return self.attachment_dir
         return self.session_dir / "attachments"
 
+    @property
+    def effective_editor(self) -> str:
+        if self.editor:
+            return self.editor
+        return os.environ.get("VISUAL") or os.environ.get("EDITOR") or ""
+
 
 def expand_path(value: str) -> Path:
-    """Expand ~ and environment variables in a user-supplied path."""
     return Path(os.path.expandvars(os.path.expanduser(value))).resolve()
 
 
 def normalize_model_id(model: str) -> str:
-    """Accept either 'gemini-x' or 'models/gemini-x' and return 'gemini-x'."""
     model = model.strip()
     if model.startswith("models/"):
         return model.split("/", 1)[1]
@@ -108,7 +122,6 @@ def parse_positive_int(value: str, fallback: int) -> int:
 
 
 def load_config() -> Config:
-    """Load ~/.config/gemini-cli/config using simple KEY=VALUE parsing."""
     cfg = Config()
     env_api_key = os.environ.get("GEMINI_API_KEY", "")
     context_turns_explicit = False
@@ -117,12 +130,8 @@ def load_config() -> Config:
         with cfg.config_file.open("r", encoding="utf-8") as fh:
             for raw_line in fh:
                 line = raw_line.strip()
-
-                # Empty lines and comments are ignored. This keeps the config
-                # file human-readable without introducing a TOML/YAML parser.
                 if not line or line.startswith("#"):
                     continue
-
                 if "=" not in line:
                     continue
 
@@ -136,25 +145,21 @@ def load_config() -> Config:
                     cfg.context_turns = parse_positive_int(value, cfg.context_turns)
                     context_turns_explicit = True
                 elif key == "HISTORY_LIMIT":
-                    # Legacy compatibility. CONTEXT_TURNS is clearer because
-                    # this setting controls how many conversation exchanges are
-                    # sent back as context, not shell command history.
                     if not context_turns_explicit:
                         cfg.context_turns = parse_positive_int(value, cfg.context_turns)
                 elif key == "GEMINI_API_KEY":
-                    # Environment variable wins. Config-file storage is a
-                    # convenience path, not the preferred security model.
                     cfg.api_key = env_api_key or value
                 elif key == "SESSION_DIR":
                     cfg.session_dir = expand_path(value)
                 elif key == "ATTACHMENT_DIR":
                     cfg.attachment_dir = expand_path(value)
-                elif key == "AUTOSCAN_PROMPT":
+                elif key == "EDITOR":
+                    cfg.editor = value
+                elif key == "MODEL_TEST_PROMPT":
                     if value:
-                        cfg.autoscan_prompt = value
-                elif key == "AUTOSCAN_EXPECTED":
-                    if value:
-                        cfg.autoscan_expected = value.lower()
+                        cfg.model_test_prompt = value
+                elif key == "MAX_ATTACHMENT_BYTES":
+                    cfg.max_attachment_bytes = parse_positive_int(value, cfg.max_attachment_bytes)
 
     if env_api_key:
         cfg.api_key = env_api_key
@@ -163,12 +168,6 @@ def load_config() -> Config:
 
 
 def set_config_value(cfg: Config, key: str, value: str) -> None:
-    """Create or update KEY=VALUE inside the config file.
-
-    This is used only for explicit save actions, such as saving a selected or
-    autoscanned model. The API-key input dialog remains session-only in this
-    release so users do not accidentally write secrets to disk.
-    """
     cfg.config_file.parent.mkdir(parents=True, exist_ok=True)
     lines: List[str] = []
     replaced = False
@@ -188,9 +187,19 @@ def set_config_value(cfg: Config, key: str, value: str) -> None:
         new_lines.append(f"{key}={value}")
 
     cfg.config_file.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+    try:
+        os.chmod(cfg.config_file, 0o600)
+    except OSError:
+        pass
 
-    # If the config file ever contains sensitive data, private permissions are
-    # preferable. This is harmless for MODEL-only config files too.
+
+def delete_config_value(cfg: Config, key: str) -> None:
+    if not cfg.config_file.exists():
+        return
+
+    lines = cfg.config_file.read_text(encoding="utf-8", errors="replace").splitlines()
+    new_lines = [line for line in lines if not line.strip().startswith(f"{key}=")]
+    cfg.config_file.write_text("\n".join(new_lines) + ("\n" if new_lines else ""), encoding="utf-8")
     try:
         os.chmod(cfg.config_file, 0o600)
     except OSError:
@@ -199,10 +208,6 @@ def set_config_value(cfg: Config, key: str, value: str) -> None:
 
 # ---------------------------------------------------------------------------
 # Command-line parsing
-# ---------------------------------------------------------------------------
-# The interface mirrors the Bash version, with ncurses-specific additions:
-# --models lists available Gemini models, and --autoscan-model tests models
-# until one actually answers a small challenge correctly.
 # ---------------------------------------------------------------------------
 
 
@@ -214,41 +219,16 @@ def parse_args() -> argparse.Namespace:
         prog=PROGRAM,
         description="ncurses Gemini terminal interface",
     )
-    parser.add_argument(
-        "session_name",
-        nargs="?",
-        help="named session to create or open",
-    )
-    parser.add_argument(
-        "--resume",
-        metavar="NAME",
-        help="resume an existing named session",
-    )
-    parser.add_argument(
-        "--list",
-        action="store_true",
-        help="list saved sessions",
-    )
-    parser.add_argument(
-        "--models",
-        action="store_true",
-        help="list available Gemini generateContent models and exit",
-    )
-    parser.add_argument(
-        "--autoscan-model",
-        action="store_true",
-        help="test available models and print the first working model",
-    )
-    parser.add_argument(
-        "--version",
-        action="store_true",
-        help="show version information",
-    )
+    parser.add_argument("session_name", nargs="?", help="named session to create or open")
+    parser.add_argument("--resume", metavar="NAME", help="resume an existing named session")
+    parser.add_argument("--list", action="store_true", help="list saved sessions")
+    parser.add_argument("--models", action="store_true", help="list available Gemini generateContent models and exit")
+    parser.add_argument("--test-model", metavar="MODEL", help="send one model-test prompt to MODEL and print the response")
+    parser.add_argument("--version", action="store_true", help="show version information")
     return parser.parse_args()
 
 
 def sanitize_session_name(name: str) -> str:
-    """Convert a human session name into a safe filename stem."""
     cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", name.strip())
     cleaned = cleaned.strip("._-")
     return cleaned or "session"
@@ -267,10 +247,6 @@ def list_sessions(session_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 # Gemini API transport
 # ---------------------------------------------------------------------------
-# urllib is used instead of requests to keep the ncurses edition standard-
-# library only. JSON request construction uses json.dumps, which fixes the
-# quoting, slash, and newline problems that appeared in the Bash implementation.
-# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -284,6 +260,20 @@ class ModelInfo:
     methods: List[str] = field(default_factory=list)
 
 
+@dataclass
+class PendingAttachment:
+    path: Path
+    mime_type: str
+    mode: str  # text or inlineData
+    size: int
+
+
+@dataclass
+class GeneratedResult:
+    text: str
+    saved_files: List[Path] = field(default_factory=list)
+
+
 def model_endpoint(cfg: Config, model_id: str) -> str:
     clean_id = normalize_model_id(model_id)
     return (
@@ -293,30 +283,117 @@ def model_endpoint(cfg: Config, model_id: str) -> str:
     )
 
 
-def gemini_url_for_model(cfg: Config) -> str:
-    return model_endpoint(cfg, cfg.effective_model)
-
-
-def parse_generated_text(body: str) -> str:
+def parse_generated_response(body: str, attachment_dir: Path, session_name: str) -> GeneratedResult:
     parsed = json.loads(body)
-    return parsed["candidates"][0]["content"]["parts"][0]["text"]
+    text_parts: List[str] = []
+    saved_files: List[Path] = []
+
+    candidates = parsed.get("candidates", [])
+    for candidate in candidates:
+        parts = candidate.get("content", {}).get("parts", [])
+        for part in parts:
+            if "text" in part:
+                text_parts.append(part.get("text", ""))
+            elif "inlineData" in part:
+                blob = part["inlineData"] or {}
+                mime = blob.get("mimeType", "application/octet-stream")
+                data = blob.get("data", "")
+                if data:
+                    path = save_generated_inline_data(data, mime, attachment_dir, session_name)
+                    saved_files.append(path)
+                    text_parts.append(
+                        f"\n[generated attachment saved]\nfile: {path.name}\nlocation: {attachment_dir}\n"
+                    )
+            elif "fileData" in part:
+                file_data = part["fileData"] or {}
+                uri = file_data.get("fileUri", "")
+                mime = file_data.get("mimeType", "")
+                text_parts.append(f"\n[generated file reference]\nuri: {uri}\nmime: {mime}\n")
+
+    combined = "\n".join([part for part in text_parts if part is not None]).strip()
+    if not combined:
+        raise ValueError("Gemini returned no displayable text or file parts")
+
+    return GeneratedResult(combined, saved_files)
 
 
-def generate_with_model(cfg: Config, model_id: str, prompt_text: str, timeout: int = 120) -> Tuple[bool, str]:
+def extension_for_mime(mime_type: str) -> str:
+    guessed = mimetypes.guess_extension(mime_type or "")
+    if guessed:
+        return guessed
+    if mime_type.startswith("image/"):
+        return ".img"
+    if mime_type.startswith("video/"):
+        return ".video"
+    if mime_type.startswith("audio/"):
+        return ".audio"
+    return ".bin"
+
+
+def next_generated_attachment_path(attachment_dir: Path, session_name: str, ext: str) -> Path:
+    attachment_dir.mkdir(parents=True, exist_ok=True)
+    highest = 0
+    pattern = re.compile(rf"^{re.escape(session_name)}-generated-(\d{{2,}}){re.escape(ext)}$")
+    for path in attachment_dir.glob(f"{session_name}-generated-*{ext}"):
+        match = pattern.match(path.name)
+        if match:
+            highest = max(highest, int(match.group(1)))
+    return attachment_dir / f"{session_name}-generated-{highest + 1:02d}{ext}"
+
+
+def save_generated_inline_data(data: str, mime_type: str, attachment_dir: Path, session_name: str) -> Path:
+    raw = base64.b64decode(data)
+    path = next_generated_attachment_path(attachment_dir, session_name, extension_for_mime(mime_type))
+    path.write_bytes(raw)
+    return path
+
+
+def attachment_to_part(attachment: PendingAttachment) -> dict:
+    if attachment.mode == "text":
+        content = attachment.path.read_text(encoding="utf-8", errors="replace")
+        return {
+            "text": (
+                f"\n[Attached file: {attachment.path.name}]\n"
+                f"Path: {attachment.path}\n"
+                f"--- BEGIN ATTACHED TEXT ---\n{content}\n--- END ATTACHED TEXT ---\n"
+            )
+        }
+
+    data = base64.b64encode(attachment.path.read_bytes()).decode("ascii")
+    return {
+        "inlineData": {
+            "mimeType": attachment.mime_type,
+            "data": data,
+        }
+    }
+
+
+def build_generate_payload(prompt_text: str, attachments: List[PendingAttachment]) -> dict:
+    parts = [{"text": prompt_text}]
+    for attachment in attachments:
+        parts.append(attachment_to_part(attachment))
+    return {"contents": [{"parts": parts}]}
+
+
+def generate_with_model(
+    cfg: Config,
+    model_id: str,
+    prompt_text: str,
+    attachments: Optional[List[PendingAttachment]] = None,
+    timeout: int = 120,
+    attachment_dir: Optional[Path] = None,
+    session_name: str = "session",
+) -> Tuple[bool, str]:
     if not cfg.api_key:
         return False, "No Gemini API key loaded. Press F3 to paste an API key."
 
-    payload = {
-        "contents": [
-            {
-                "parts": [
-                    {
-                        "text": prompt_text,
-                    }
-                ]
-            }
-        ]
-    }
+    attachments = attachments or []
+    attachment_dir = attachment_dir or cfg.effective_attachment_dir
+
+    try:
+        payload = build_generate_payload(prompt_text, attachments)
+    except Exception as exc:
+        return False, f"Attachment payload error: {exc}"
 
     data = json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(
@@ -338,29 +415,35 @@ def generate_with_model(cfg: Config, model_id: str, prompt_text: str, timeout: i
         return False, f"Gemini request error: {exc}"
 
     try:
-        text = parse_generated_text(body)
+        result = parse_generated_response(body, attachment_dir, session_name)
     except Exception as exc:
         return False, f"Gemini response parse error: {exc}; raw response: {body[:1000]}"
 
-    if not text.strip():
-        return False, "Gemini returned an empty text response"
-
-    return True, text
+    return True, result.text
 
 
-def call_gemini(cfg: Config, prompt_text: str) -> str:
-    ok, text = generate_with_model(cfg, cfg.effective_model, prompt_text, timeout=120)
+def call_gemini(
+    cfg: Config,
+    prompt_text: str,
+    attachments: List[PendingAttachment],
+    attachment_dir: Path,
+    session_name: str,
+) -> str:
+    ok, text = generate_with_model(
+        cfg,
+        cfg.effective_model,
+        prompt_text,
+        attachments=attachments,
+        timeout=120,
+        attachment_dir=attachment_dir,
+        session_name=session_name,
+    )
     if ok:
         return text
     return f"({text})"
 
 
 def fetch_models(cfg: Config) -> Tuple[List[ModelInfo], Optional[str]]:
-    """Fetch available models that support generateContent.
-
-    The returned order follows Google's API order as much as possible. Autoscan
-    tests in that order rather than using a hardcoded guess about future names.
-    """
     if not cfg.api_key:
         return [], "No Gemini API key loaded. Press F3 to paste an API key."
 
@@ -436,76 +519,22 @@ def print_models(cfg: Config) -> int:
     return 0
 
 
-def autoscan_response_is_valid(cfg: Config, text: str) -> bool:
-    expected = cfg.autoscan_expected.strip().lower()
-    if not expected:
-        expected = DEFAULT_AUTOSCAN_EXPECTED
-    return expected in text.lower()
-
-
-def autoscan_model(cfg: Config, progress=None) -> Tuple[Optional[ModelInfo], str]:
-    """Find the first model that answers the autoscan challenge correctly.
-
-    This is intentionally empirical. Instead of guessing what Google's future
-    model names mean, autoscan fetches the current model list and tests each
-    generateContent-compatible candidate with a factual prompt. The model must
-    return text containing the expected answer substring.
-    """
-    models, error = fetch_models(cfg)
-    if error:
-        return None, error
-
-    if not models:
-        return None, "No generateContent-compatible models were returned by the API."
-
-    failures: List[str] = []
-    total = len(models)
-
-    for index, model in enumerate(models, start=1):
-        if progress is not None:
-            progress(index, total, model)
-
-        ok, text = generate_with_model(cfg, model.model_id, cfg.autoscan_prompt, timeout=45)
-        if ok and autoscan_response_is_valid(cfg, text):
-            return model, text.strip()
-
-        if ok:
-            expected = cfg.autoscan_expected.strip().lower() or DEFAULT_AUTOSCAN_EXPECTED
-            snippet = text.strip().replace("\n", " ")[:200]
-            failures.append(
-                f"{model.model_id}: response did not contain expected substring '{expected}'; response: {snippet}"
-            )
-        else:
-            failures.append(f"{model.model_id}: {text}")
-
-    summary = "No tested model answered the autoscan challenge correctly."
-    if failures:
-        summary += " Last failure: " + failures[-1]
-    return None, summary
-
-
-def print_autoscan_model(cfg: Config) -> int:
-    def progress(index: int, total: int, model: ModelInfo) -> None:
-        print(f"testing {index}/{total}: {model.model_id}", file=sys.stderr)
-
-    model, error_or_text = autoscan_model(cfg, progress=progress)
-    if model is None:
-        print(f"ERROR: {error_or_text}", file=sys.stderr)
+def print_test_model(cfg: Config, model_id: str) -> int:
+    ok, text = generate_with_model(cfg, model_id, cfg.model_test_prompt, timeout=60)
+    if not ok:
+        print(f"ERROR: {text}", file=sys.stderr)
         return 1
-
-    print(model.model_id)
+    print(text)
     return 0
 
 
 # ---------------------------------------------------------------------------
 # Session log parsing and writing
 # ---------------------------------------------------------------------------
-# Logs remain plain text. Resuming a session rebuilds recent memory from the
-# existing log and also shows recent log entries in the transcript window.
-# ---------------------------------------------------------------------------
 
 
 ENTRY_RE = re.compile(r"^\[(\d{2}:\d{2}:\d{2})\] ([^:]+): (.*)$")
+CONTEXT_PREFIX = "CONTEXT_SNAPSHOT "
 
 
 @dataclass
@@ -519,6 +548,11 @@ def append_log(path: Path, speaker: str, text: str, timestamp: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as fh:
         fh.write(f"[{timestamp}] {speaker}: {text}\n")
+
+
+def append_context_snapshot(path: Path, context_buffer: List[str]) -> None:
+    payload = json.dumps(context_buffer, ensure_ascii=False)
+    append_log(path, "system", CONTEXT_PREFIX + payload, now_time())
 
 
 def load_log_entries(path: Path) -> List[LogEntry]:
@@ -550,12 +584,21 @@ def load_log_entries(path: Path) -> List[LogEntry]:
     return entries
 
 
+def latest_context_snapshot(entries: List[LogEntry]) -> Optional[List[str]]:
+    for entry in reversed(entries):
+        if entry.speaker == "system" and entry.text.startswith(CONTEXT_PREFIX):
+            raw = entry.text[len(CONTEXT_PREFIX) :]
+            try:
+                parsed = json.loads(raw)
+            except Exception:
+                continue
+            if isinstance(parsed, list) and all(isinstance(item, str) for item in parsed):
+                return parsed
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Attachment extraction
-# ---------------------------------------------------------------------------
-# Fenced markdown code blocks are saved to files and replaced in the transcript
-# display with attachment notices. The raw Gemini response is still written to
-# the log before extraction, so logs remain authoritative.
 # ---------------------------------------------------------------------------
 
 
@@ -629,9 +672,6 @@ def extract_attachments(text: str, attachment_dir: Path, session_name: str) -> s
 # ---------------------------------------------------------------------------
 # Text wrapping helpers
 # ---------------------------------------------------------------------------
-# These helpers prevent addstr calls from writing past the terminal edge and
-# provide soft-wrapped rendering for transcript and input areas.
-# ---------------------------------------------------------------------------
 
 
 def wrap_for_width(text: str, width: int) -> List[str]:
@@ -676,16 +716,6 @@ class InputSegment:
 # ---------------------------------------------------------------------------
 # Curses application
 # ---------------------------------------------------------------------------
-# The TUI fixes the core shell problems:
-#   - cursor redraws
-#   - multiline editing
-#   - wrapped input display
-#   - scrollable transcript
-#   - model selection without editing config
-#   - API-key entry without editing config
-#   - autoscan model selection without guessing future model names
-#   - mousewheel scrolling and mouse-assisted navigation
-# ---------------------------------------------------------------------------
 
 
 class GeminiCursesApp:
@@ -708,9 +738,7 @@ class GeminiCursesApp:
         self.cursor_col = 0
         self.input_scroll = 0
 
-        # Layout coordinates are refreshed on every draw. Mouse handling uses
-        # these values to determine whether a click belongs to the transcript,
-        # input box, status bar, or function-key label area.
+        self.pending_attachments: List[PendingAttachment] = []
         self.layout: dict[str, int] = {}
         self.last_input_segments: List[InputSegment] = []
 
@@ -718,9 +746,7 @@ class GeminiCursesApp:
         self.should_quit = False
 
     def default_status(self) -> str:
-        if not self.cfg.model:
-            return "No MODEL configured. F4=autoscan | F2=models | F3=API key | Ctrl+G=send"
-        return "Enter=newline | Ctrl+G/F5=send | F2=models | F3=API key | F4=autoscan | F10/Ctrl+Q=quit"
+        return "F1=help | F2=models | F3=key | F4=sessions | F5=options | F6=memory | F7=files | F8=editor | F9=credits"
 
     # ---------------------------------------------------------------------
     # Memory and resume model
@@ -728,21 +754,30 @@ class GeminiCursesApp:
 
     def load_session_into_ui(self) -> None:
         entries = load_log_entries(self.session_path)
+        self.transcript = []
+        self.context_buffer = []
         if not entries:
             return
 
         for entry in entries[-self.TRANSCRIPT_REPLAY_LIMIT :]:
+            if entry.speaker == "system" and entry.text.startswith(CONTEXT_PREFIX):
+                continue
             self.transcript.append(TranscriptItem(entry.speaker, entry.text, entry.timestamp))
 
-        # CONTEXT_TURNS counts user/assistant exchanges. Since the internal
-        # buffer stores individual speaker entries, we keep up to twice that
-        # number of entries when rebuilding memory from logs.
-        max_entries = self.cfg.context_turns * 2
-        for entry in entries[-max_entries:]:
-            if entry.speaker == "Gemini":
-                self.context_buffer.append("Assistant: " + entry.text)
-            else:
-                self.context_buffer.append("User: " + entry.text)
+        snapshot = latest_context_snapshot(entries)
+        if snapshot is not None:
+            self.context_buffer = snapshot[-self.cfg.context_turns * 2 :]
+        else:
+            max_entries = self.cfg.context_turns * 2
+            normal_entries = [
+                entry for entry in entries
+                if not (entry.speaker == "system" and entry.text.startswith(CONTEXT_PREFIX))
+            ]
+            for entry in normal_entries[-max_entries:]:
+                if entry.speaker == "Gemini":
+                    self.context_buffer.append("Assistant: " + entry.text)
+                elif entry.speaker != "system":
+                    self.context_buffer.append("User: " + entry.text)
 
         self.trim_context_buffer()
         self.status = f"loaded session: {self.session_name}"
@@ -754,6 +789,9 @@ class GeminiCursesApp:
 
     def build_context(self) -> str:
         return "\n".join(self.context_buffer)
+
+    def save_context_snapshot(self) -> None:
+        append_context_snapshot(self.session_path, self.context_buffer)
 
     # ---------------------------------------------------------------------
     # Safe curses drawing
@@ -789,9 +827,10 @@ class GeminiCursesApp:
 
     def draw_header(self, width: int) -> None:
         key_state = "key:loaded" if self.cfg.api_key else "key:missing"
-        header = f"{PROGRAM} | session: {self.session_name} | model: {self.model_label()} | {key_state}"
-        self.safe_addstr(0, 0, header, width)
-        self.safe_addstr(1, 0, "_" * width, width)
+        attach_state = f"attachments:{len(self.pending_attachments)}"
+        header = f"{PROGRAM} | session: {self.session_name} | model: {self.model_label()} | {key_state} | {attach_state}"
+        self.safe_addstr(0, 0, header, width, curses.A_REVERSE)
+        self.safe_addstr(1, 0, "_" * width, width, curses.A_DIM)
 
     def draw_transcript(self, start_y: int, height: int, width: int) -> None:
         lines = self.transcript_display_lines(width)
@@ -835,9 +874,9 @@ class GeminiCursesApp:
         return segments or [InputSegment("> ", 0, 0, max(1, width - 2))], cursor_visual_index, cursor_x
 
     def draw_input(self, label_y: int, input_y: int, width: int) -> None:
-        label = "INPUT: Enter=newline | Ctrl+G/F5=send | F2=models | F3=API key | F4=autoscan"
-        self.safe_addstr(label_y, 0, "_" * width, width)
-        self.safe_addstr(label_y, 0, label, width)
+        label = "INPUT: Enter=newline | Ctrl+G=send | F1-F9 menus | click places cursor"
+        self.safe_addstr(label_y, 0, "_" * width, width, curses.A_DIM)
+        self.safe_addstr(label_y, 0, label, width, curses.A_DIM)
 
         segments, cursor_visual_index, cursor_x = self.input_segments(width)
         self.last_input_segments = segments
@@ -864,8 +903,8 @@ class GeminiCursesApp:
             pass
 
     def draw_status(self, y: int, width: int) -> None:
-        self.safe_addstr(y, 0, "_" * width, width)
-        self.safe_addstr(y, 0, self.status, width)
+        self.safe_addstr(y, 0, "_" * width, width, curses.A_DIM)
+        self.safe_addstr(y, 0, self.status, width, curses.A_REVERSE)
 
     def draw(self) -> None:
         self.stdscr.erase()
@@ -907,16 +946,6 @@ class GeminiCursesApp:
     # ---------------------------------------------------------------------
     # Mouse handling
     # ---------------------------------------------------------------------
-    # Mouse support is deliberately practical:
-    #   - wheel scrolls the transcript in the main view
-    #   - left click in the input area places the input cursor
-    #   - wheel scrolls modal lists where implemented
-    #   - model selector rows can be clicked and double-clicked
-    #
-    # Native terminal text selection and drag-copy are left to the terminal
-    # emulator. Ncurses applications should not try to replace the user's
-    # terminal selection model.
-    # ---------------------------------------------------------------------
 
     def mouse_wheel_delta(self, state: int) -> int:
         if state & getattr(curses, "BUTTON4_PRESSED", 0):
@@ -945,8 +974,6 @@ class GeminiCursesApp:
 
         delta = self.mouse_wheel_delta(state)
         if delta:
-            # Wheel up means move older in transcript, which is represented by
-            # increasing transcript_scroll. Wheel down reduces the scroll offset.
             if delta > 0:
                 self.transcript_scroll += MOUSE_SCROLL_LINES
             else:
@@ -963,12 +990,6 @@ class GeminiCursesApp:
             if input_y <= y < input_y + input_h:
                 self.place_cursor_from_mouse(x, y - input_y)
                 self.status = "mouse: input cursor placed"
-                return
-
-            transcript_y = self.layout.get("transcript_y", -1)
-            transcript_h = self.layout.get("transcript_h", 0)
-            if transcript_y <= y < transcript_y + transcript_h:
-                self.status = "mouse: transcript area"
                 return
 
     def place_cursor_from_mouse(self, x: int, visible_row: int) -> None:
@@ -992,25 +1013,27 @@ class GeminiCursesApp:
         while True:
             self.stdscr.erase()
             height, width = self.stdscr.getmaxyx()
-            box_w = min(width - 4, 76)
+            box_w = min(width - 4, 78)
             box_h = min(height - 4, max(8, len(lines) + 5))
             top = max(0, (height - box_h) // 2)
             left = max(0, (width - box_w) // 2)
 
-            self.safe_addstr(top, left, "+" + "-" * (box_w - 2) + "+")
-            self.safe_addstr(top + 1, left, "|" + title.center(box_w - 2) + "|")
-            self.safe_addstr(top + 2, left, "+" + "-" * (box_w - 2) + "+")
+            self.safe_addstr(top, left, "+" + "-" * (box_w - 2) + "+", attr=curses.A_DIM)
+            self.safe_addstr(top + 1, left, "|" + title.center(box_w - 2) + "|", attr=curses.A_REVERSE)
+            self.safe_addstr(top + 2, left, "+" + "-" * (box_w - 2) + "+", attr=curses.A_DIM)
 
             y = top + 3
-            for raw in lines[: box_h - 5]:
+            for raw in lines:
                 for wrapped in wrap_for_width(raw, box_w - 4):
                     if y >= top + box_h - 2:
                         break
                     self.safe_addstr(y, left + 2, wrapped, box_w - 4)
                     y += 1
+                if y >= top + box_h - 2:
+                    break
 
-            self.safe_addstr(top + box_h - 2, left + 2, "Press any key or click to continue", box_w - 4)
-            self.safe_addstr(top + box_h - 1, left, "+" + "-" * (box_w - 2) + "+")
+            self.safe_addstr(top + box_h - 2, left + 2, "Press any key or click to continue", box_w - 4, curses.A_DIM)
+            self.safe_addstr(top + box_h - 1, left, "+" + "-" * (box_w - 2) + "+", attr=curses.A_DIM)
             self.stdscr.refresh()
             self.stdscr.getch()
             return
@@ -1024,9 +1047,9 @@ class GeminiCursesApp:
             top = max(0, (height - box_h) // 2)
             left = max(0, (width - box_w) // 2)
 
-            self.safe_addstr(top, left, "+" + "-" * (box_w - 2) + "+")
-            self.safe_addstr(top + 1, left, "|" + title.center(box_w - 2) + "|")
-            self.safe_addstr(top + 2, left, "+" + "-" * (box_w - 2) + "+")
+            self.safe_addstr(top, left, "+" + "-" * (box_w - 2) + "+", attr=curses.A_DIM)
+            self.safe_addstr(top + 1, left, "|" + title.center(box_w - 2) + "|", attr=curses.A_REVERSE)
+            self.safe_addstr(top + 2, left, "+" + "-" * (box_w - 2) + "+", attr=curses.A_DIM)
 
             y = top + 3
             for line in wrap_for_width(message, box_w - 4)[:3]:
@@ -1035,8 +1058,8 @@ class GeminiCursesApp:
 
             default_label = "yes" if default else "no"
             prompt = f"Y/N? Enter={default_label} | Esc=no | click left half=yes, right half=no"
-            self.safe_addstr(top + box_h - 2, left + 2, prompt, box_w - 4)
-            self.safe_addstr(top + box_h - 1, left, "+" + "-" * (box_w - 2) + "+")
+            self.safe_addstr(top + box_h - 2, left + 2, prompt, box_w - 4, curses.A_DIM)
+            self.safe_addstr(top + box_h - 1, left, "+" + "-" * (box_w - 2) + "+", attr=curses.A_DIM)
             self.stdscr.refresh()
 
             ch = self.stdscr.getch()
@@ -1055,110 +1078,214 @@ class GeminiCursesApp:
             if ch in (10, 13, curses.KEY_ENTER):
                 return default
 
-    def maybe_save_model_to_config(self) -> None:
-        if not self.cfg.model:
-            return
-        if self.ask_yes_no(
-            "SAVE MODEL",
-            f"Save MODEL={self.cfg.model} to {self.cfg.config_file}?",
-            default=True,
-        ):
-            set_config_value(self.cfg, "MODEL", self.cfg.model)
-            self.status = f"model saved: {self.cfg.model}"
-
-    def open_api_key_input(self) -> None:
-        key = ""
-        cursor = 0
-        prompt_status = "Paste API key. Enter=activate for this session. Esc=cancel."
-
+    def text_input_modal(self, title: str, prompt: str, initial: str = "", secret: bool = False) -> Optional[str]:
+        value = initial
+        cursor = len(value)
         while True:
             self.stdscr.erase()
             height, width = self.stdscr.getmaxyx()
-            box_w = min(width - 4, 82)
-            box_h = 10
+            box_w = min(width - 4, 84)
+            box_h = 11
             top = max(0, (height - box_h) // 2)
             left = max(0, (width - box_w) // 2)
+            field_w = box_w - 6
 
-            masked = "*" * max(0, len(key) - 4) + key[-4:]
-            available = max(1, box_w - 6)
-            shown = masked[-available:]
+            visible_value = "*" * max(0, len(value) - 4) + value[-4:] if secret else value
+            left_cut = max(0, cursor - field_w + 1)
+            shown = visible_value[left_cut : left_cut + field_w]
 
-            self.safe_addstr(top, left, "+" + "-" * (box_w - 2) + "+")
-            self.safe_addstr(top + 1, left, "|" + "API KEY INPUT".center(box_w - 2) + "|")
-            self.safe_addstr(top + 2, left, "+" + "-" * (box_w - 2) + "+")
-            self.safe_addstr(top + 3, left + 2, prompt_status, box_w - 4)
-            self.safe_addstr(top + 4, left + 2, "This does not write the key to the config file.", box_w - 4)
-            self.safe_addstr(top + 6, left + 2, "Key: " + shown, box_w - 4)
-            self.safe_addstr(top + 8, left + 2, f"Characters entered: {len(key)}", box_w - 4)
-            self.safe_addstr(top + 9, left, "+" + "-" * (box_w - 2) + "+")
+            self.safe_addstr(top, left, "+" + "-" * (box_w - 2) + "+", attr=curses.A_DIM)
+            self.safe_addstr(top + 1, left, "|" + title.center(box_w - 2) + "|", attr=curses.A_REVERSE)
+            self.safe_addstr(top + 2, left, "+" + "-" * (box_w - 2) + "+", attr=curses.A_DIM)
+            for idx, line in enumerate(wrap_for_width(prompt, box_w - 4)[:3]):
+                self.safe_addstr(top + 3 + idx, left + 2, line, box_w - 4)
+            self.safe_addstr(top + 7, left + 2, " " * field_w, field_w, curses.A_REVERSE)
+            self.safe_addstr(top + 7, left + 2, shown, field_w, curses.A_REVERSE)
+            self.safe_addstr(top + 9, left + 2, "Enter=accept | Esc=cancel | Backspace=edit", box_w - 4, curses.A_DIM)
+            self.safe_addstr(top + 10, left, "+" + "-" * (box_w - 2) + "+", attr=curses.A_DIM)
+            try:
+                self.stdscr.move(top + 7, left + 2 + min(cursor - left_cut, field_w - 1))
+            except curses.error:
+                pass
             self.stdscr.refresh()
 
             ch = self.stdscr.getch()
-            if ch == curses.KEY_MOUSE:
-                try:
-                    _mouse_id, x, _y, _z, state = curses.getmouse()
-                except curses.error:
-                    continue
-                if self.mouse_button1(state):
-                    # Clicking inside the key field places the editing cursor
-                    # approximately where the user clicked.
-                    field_start = left + 7
-                    if x >= field_start:
-                        cursor = min(len(key), max(0, len(key) - len(shown) + (x - field_start)))
-                continue
             if ch in (10, 13, curses.KEY_ENTER):
-                if key.strip():
-                    self.cfg.api_key = key.strip()
-                    self.status = "API key activated for this session"
-                else:
-                    self.status = "API key entry cancelled: empty key"
-                return
-            if ch in (27,):
-                self.status = "API key entry cancelled"
-                return
+                return value.strip()
+            if ch == 27:
+                return None
             if ch in (curses.KEY_BACKSPACE, 127, 8):
                 if cursor > 0:
-                    key = key[: cursor - 1] + key[cursor:]
+                    value = value[: cursor - 1] + value[cursor:]
                     cursor -= 1
-                continue
-            if ch == curses.KEY_LEFT:
+            elif ch == curses.KEY_DC:
+                if cursor < len(value):
+                    value = value[:cursor] + value[cursor + 1 :]
+            elif ch == curses.KEY_LEFT:
                 cursor = max(0, cursor - 1)
-                continue
-            if ch == curses.KEY_RIGHT:
-                cursor = min(len(key), cursor + 1)
-                continue
-            if ch == curses.KEY_HOME:
+            elif ch == curses.KEY_RIGHT:
+                cursor = min(len(value), cursor + 1)
+            elif ch == curses.KEY_HOME:
                 cursor = 0
-                continue
-            if ch == curses.KEY_END:
-                cursor = len(key)
-                continue
-            if 32 <= ch <= 126:
-                key = key[:cursor] + chr(ch) + key[cursor:]
+            elif ch == curses.KEY_END:
+                cursor = len(value)
+            elif 32 <= ch <= 126:
+                value = value[:cursor] + chr(ch) + value[cursor:]
                 cursor += 1
 
-    def show_model_info(self, model: ModelInfo) -> None:
-        lines = [
-            f"Model ID: {model.model_id}",
-            f"API name: {model.api_name}",
-            f"Display name: {model.display_name}",
-            f"Input token limit: {model.input_token_limit}",
-            f"Output token limit: {model.output_token_limit}",
-            f"Methods: {', '.join(model.methods)}",
-            "",
-            model.description or "No description returned by API.",
+    def select_menu(self, title: str, rows: List[str], footer: str = "Enter=select | Esc=cancel") -> Optional[int]:
+        if not rows:
+            self.show_message(title, ["No entries."])
+            return None
+
+        selected = 0
+        top_index = 0
+        while True:
+            self.stdscr.erase()
+            height, width = self.stdscr.getmaxyx()
+            visible_h = max(1, height - 5)
+            self.safe_addstr(0, 0, title, width, curses.A_REVERSE)
+            self.safe_addstr(1, 0, footer, width, curses.A_DIM)
+            self.safe_addstr(2, 0, "_" * width, width, curses.A_DIM)
+
+            if selected < top_index:
+                top_index = selected
+            elif selected >= top_index + visible_h:
+                top_index = selected - visible_h + 1
+
+            for row in range(visible_h):
+                idx = top_index + row
+                if idx >= len(rows):
+                    break
+                attr = curses.A_REVERSE if idx == selected else 0
+                self.safe_addstr(3 + row, 0, rows[idx], width, attr)
+
+            self.safe_addstr(height - 1, 0, f"{selected + 1}/{len(rows)}", width, curses.A_DIM)
+            self.stdscr.refresh()
+            ch = self.stdscr.getch()
+            if ch in (27, ord("q"), ord("Q")):
+                return None
+            if ch in (10, 13, curses.KEY_ENTER):
+                return selected
+            if ch == curses.KEY_MOUSE:
+                try:
+                    _mouse_id, _x, y, _z, state = curses.getmouse()
+                except curses.error:
+                    continue
+                delta = self.mouse_wheel_delta(state)
+                if delta > 0:
+                    selected = max(0, selected - MOUSE_SCROLL_LINES)
+                elif delta < 0:
+                    selected = min(len(rows) - 1, selected + MOUSE_SCROLL_LINES)
+                elif self.mouse_button1(state) and 3 <= y < 3 + visible_h:
+                    idx = top_index + (y - 3)
+                    if 0 <= idx < len(rows):
+                        selected = idx
+                        if self.mouse_button1_double(state):
+                            return selected
+                continue
+            if ch == curses.KEY_UP:
+                selected = max(0, selected - 1)
+            elif ch == curses.KEY_DOWN:
+                selected = min(len(rows) - 1, selected + 1)
+            elif ch == curses.KEY_PPAGE:
+                selected = max(0, selected - visible_h)
+            elif ch == curses.KEY_NPAGE:
+                selected = min(len(rows) - 1, selected + visible_h)
+            elif ch == curses.KEY_HOME:
+                selected = 0
+            elif ch == curses.KEY_END:
+                selected = len(rows) - 1
+
+    # ---------------------------------------------------------------------
+    # Feature menus
+    # ---------------------------------------------------------------------
+
+    def show_help(self) -> None:
+        self.show_message(
+            "HELP",
+            [
+                "F1 Help | F2 Models | F3 API Key | F4 Sessions | F5 Options",
+                "F6 Memory | F7 Files | F8 External Editor | F9 Credits | F10 Quit",
+                "Ctrl+G or F5 sends the current message. Enter inserts a newline.",
+                "Mousewheel scrolls transcript or lists. Click in input places cursor.",
+            ],
+        )
+
+    def show_credits(self) -> None:
+        self.show_message(
+            "CREDITS",
+            [
+                "gemini-terminal-tools",
+                f"GitHub: {PROJECT_URL}",
+                "",
+                PROJECT_NOTICE,
+            ],
+        )
+
+    def open_api_key_manager(self) -> None:
+        choices = [
+            "Paste API key for this session only",
+            "Paste API key and save to config",
+            "Forget runtime API key",
+            "Remove GEMINI_API_KEY from config",
         ]
-        self.show_message("MODEL INFO", lines)
+        idx = self.select_menu("API KEY", choices)
+        if idx is None:
+            return
+        if idx in (0, 1):
+            key = self.text_input_modal("API KEY INPUT", "Paste Gemini API key.", secret=True)
+            if not key:
+                self.status = "API key entry cancelled"
+                return
+            self.cfg.api_key = key
+            if idx == 1:
+                set_config_value(self.cfg, "GEMINI_API_KEY", key)
+                self.status = "API key saved to config"
+            else:
+                self.status = "API key active for this session only"
+        elif idx == 2:
+            self.cfg.api_key = ""
+            self.status = "runtime API key forgotten"
+        elif idx == 3:
+            delete_config_value(self.cfg, "GEMINI_API_KEY")
+            self.status = "GEMINI_API_KEY removed from config"
+
+    def show_model_info(self, model: ModelInfo) -> None:
+        self.show_message(
+            "MODEL INFO",
+            [
+                f"Model ID: {model.model_id}",
+                f"API name: {model.api_name}",
+                f"Display name: {model.display_name}",
+                f"Input token limit: {model.input_token_limit}",
+                f"Output token limit: {model.output_token_limit}",
+                f"Methods: {', '.join(model.methods)}",
+                "",
+                model.description or "No description returned by API.",
+            ],
+        )
+
+    def test_model_dialog(self, model: ModelInfo) -> None:
+        self.status = f"testing model: {model.model_id}"
+        self.draw()
+        ok, text = generate_with_model(self.cfg, model.model_id, self.cfg.model_test_prompt, timeout=60)
+        title = "MODEL TEST OK" if ok else "MODEL TEST FAILED"
+        self.show_message(
+            title,
+            [
+                f"Model: {model.model_id}",
+                f"Prompt: {self.cfg.model_test_prompt}",
+                "",
+                "Response:",
+                text,
+            ],
+        )
+        self.status = f"tested model: {model.model_id}"
 
     def open_model_selector(self) -> None:
         if not self.cfg.api_key:
-            self.show_message(
-                "MODEL SELECTOR",
-                [
-                    "No API key is loaded.",
-                    "Press F3 in the main interface to paste an API key, then try F2 again.",
-                ],
-            )
+            self.show_message("MODEL SELECTOR", ["No API key is loaded. Press F3 to paste an API key."])
             self.status = "model selector cancelled: no API key"
             return
 
@@ -1171,7 +1298,6 @@ class GeminiCursesApp:
             return
         if not models:
             self.show_message("MODEL SELECTOR", ["No generateContent models returned by the API."])
-            self.status = "model list empty"
             return
 
         selected = 0
@@ -1187,10 +1313,10 @@ class GeminiCursesApp:
             height, width = self.stdscr.getmaxyx()
             visible_h = max(1, height - 7)
 
-            self.safe_addstr(0, 0, "MODEL SELECTOR", width)
-            self.safe_addstr(1, 0, f"Current model: {self.model_label()}", width)
-            self.safe_addstr(2, 0, "Enter=activate | i=info | click=select | dbl-click=activate | wheel=scroll", width)
-            self.safe_addstr(3, 0, "_" * width, width)
+            self.safe_addstr(0, 0, "MODEL SELECTOR", width, curses.A_REVERSE)
+            self.safe_addstr(1, 0, f"Current model: {self.model_label()}", width, curses.A_DIM)
+            self.safe_addstr(2, 0, "Enter=activate | t=test | s=save | i=info | q/Esc=cancel | click/dbl-click", width, curses.A_DIM)
+            self.safe_addstr(3, 0, "_" * width, width, curses.A_DIM)
 
             if selected < top_index:
                 top_index = selected
@@ -1210,9 +1336,8 @@ class GeminiCursesApp:
                 attr = curses.A_REVERSE if model_index == selected else 0
                 self.safe_addstr(4 + row, 0, line, width, attr)
 
-            footer = f"{selected + 1}/{len(models)}"
-            self.safe_addstr(height - 2, 0, "_" * width, width)
-            self.safe_addstr(height - 1, 0, footer, width)
+            self.safe_addstr(height - 2, 0, "_" * width, width, curses.A_DIM)
+            self.safe_addstr(height - 1, 0, f"{selected + 1}/{len(models)}", width, curses.A_DIM)
             self.stdscr.refresh()
 
             ch = self.stdscr.getch()
@@ -1221,7 +1346,6 @@ class GeminiCursesApp:
                     _mouse_id, _x, y, _z, state = curses.getmouse()
                 except curses.error:
                     continue
-
                 delta = self.mouse_wheel_delta(state)
                 if delta > 0:
                     selected = max(0, selected - MOUSE_SCROLL_LINES)
@@ -1229,7 +1353,6 @@ class GeminiCursesApp:
                 if delta < 0:
                     selected = min(len(models) - 1, selected + MOUSE_SCROLL_LINES)
                     continue
-
                 if self.mouse_button1(state) and 4 <= y < 4 + visible_h:
                     idx = top_index + (y - 4)
                     if 0 <= idx < len(models):
@@ -1241,8 +1364,6 @@ class GeminiCursesApp:
                             self.transcript.append(TranscriptItem("system", f"Model activated: {chosen.model_id}"))
                             self.maybe_save_model_to_config()
                             return
-                    continue
-
                 continue
 
             if ch in (27, ord("q"), ord("Q")):
@@ -1251,6 +1372,14 @@ class GeminiCursesApp:
             if ch in (ord("i"), ord("I")):
                 self.show_model_info(models[selected])
                 continue
+            if ch in (ord("t"), ord("T")):
+                self.test_model_dialog(models[selected])
+                continue
+            if ch in (ord("s"), ord("S")):
+                set_config_value(self.cfg, "MODEL", models[selected].model_id)
+                self.cfg.model = models[selected].model_id
+                self.status = f"saved model: {self.cfg.model}"
+                return
             if ch in (10, 13, curses.KEY_ENTER):
                 chosen = models[selected]
                 self.cfg.model = chosen.model_id
@@ -1271,34 +1400,261 @@ class GeminiCursesApp:
             elif ch == curses.KEY_END:
                 selected = len(models) - 1
 
-    def run_autoscan(self) -> None:
-        if not self.cfg.api_key:
-            self.show_message(
-                "AUTOSCAN MODEL",
-                [
-                    "No API key is loaded.",
-                    "Press F3 to paste an API key, then try F4 again.",
-                ],
-            )
-            self.status = "autoscan cancelled: no API key"
+    def maybe_save_model_to_config(self) -> None:
+        if self.cfg.model and self.ask_yes_no("SAVE MODEL", f"Save MODEL={self.cfg.model} to config?", default=True):
+            set_config_value(self.cfg, "MODEL", self.cfg.model)
+            self.status = f"model saved: {self.cfg.model}"
+
+    def open_sessions_menu(self) -> None:
+        while True:
+            rows = ["Rename current session", "New timestamped session"]
+            logs = sorted(self.cfg.session_dir.glob("*.log"))
+            rows.extend([f"Open: {path.stem}" for path in logs])
+            idx = self.select_menu("SESSIONS", rows, "Enter=select | q/Esc=cancel")
+            if idx is None:
+                return
+            if idx == 0:
+                self.rename_current_session()
+                return
+            if idx == 1:
+                self.session_name = default_session_name()
+                self.session_path = self.cfg.session_dir / f"{self.session_name}.log"
+                self.transcript = []
+                self.context_buffer = []
+                self.status = f"new session: {self.session_name}"
+                return
+            path = logs[idx - 2]
+            self.session_name = path.stem
+            self.session_path = path
+            self.load_session_into_ui()
             return
 
-        def progress(index: int, total: int, model: ModelInfo) -> None:
-            self.status = f"autoscan testing {index}/{total}: {model.model_id}"
-            self.draw()
+    def rename_current_session(self) -> None:
+        new_name = self.text_input_modal("RENAME SESSION", "Enter new session name:", self.session_name)
+        if not new_name:
+            return
+        new_name = sanitize_session_name(new_name)
+        new_path = self.cfg.session_dir / f"{new_name}.log"
+        if new_path.exists() and new_path != self.session_path:
+            self.show_message("RENAME FAILED", [f"Target session already exists: {new_name}"])
+            return
+        if self.session_path.exists():
+            self.session_path.rename(new_path)
+        self.session_name = new_name
+        self.session_path = new_path
+        self.status = f"renamed session: {new_name}"
 
-        self.status = "autoscan fetching model list..."
-        self.draw()
-        model, result = autoscan_model(self.cfg, progress=progress)
-        if model is None:
-            self.show_message("AUTOSCAN FAILED", wrap_for_width(result, 70))
-            self.status = "autoscan failed"
+    def open_options_menu(self) -> None:
+        while True:
+            rows = [
+                f"MODEL = {self.cfg.model or '(unset; fallback used)'}",
+                f"CONTEXT_TURNS = {self.cfg.context_turns}",
+                f"SESSION_DIR = {self.cfg.session_dir}",
+                f"ATTACHMENT_DIR = {self.cfg.effective_attachment_dir}",
+                f"EDITOR = {self.cfg.editor or '(VISUAL/EDITOR/default)'}",
+                f"MODEL_TEST_PROMPT = {self.cfg.model_test_prompt}",
+                f"MAX_ATTACHMENT_BYTES = {self.cfg.max_attachment_bytes}",
+            ]
+            idx = self.select_menu("OPTIONS", rows, "Enter=edit | q/Esc=cancel")
+            if idx is None:
+                return
+            keys = ["MODEL", "CONTEXT_TURNS", "SESSION_DIR", "ATTACHMENT_DIR", "EDITOR", "MODEL_TEST_PROMPT", "MAX_ATTACHMENT_BYTES"]
+            key = keys[idx]
+            current = ""
+            if key == "MODEL":
+                current = self.cfg.model
+            elif key == "CONTEXT_TURNS":
+                current = str(self.cfg.context_turns)
+            elif key == "SESSION_DIR":
+                current = str(self.cfg.session_dir)
+            elif key == "ATTACHMENT_DIR":
+                current = str(self.cfg.effective_attachment_dir)
+            elif key == "EDITOR":
+                current = self.cfg.editor
+            elif key == "MODEL_TEST_PROMPT":
+                current = self.cfg.model_test_prompt
+            elif key == "MAX_ATTACHMENT_BYTES":
+                current = str(self.cfg.max_attachment_bytes)
+            value = self.text_input_modal("EDIT OPTION", f"Set {key}:", current)
+            if value is None:
+                continue
+            set_config_value(self.cfg, key, value)
+            if key == "MODEL":
+                self.cfg.model = normalize_model_id(value)
+            elif key == "CONTEXT_TURNS":
+                self.cfg.context_turns = parse_positive_int(value, self.cfg.context_turns)
+            elif key == "SESSION_DIR":
+                self.cfg.session_dir = expand_path(value)
+            elif key == "ATTACHMENT_DIR":
+                self.cfg.attachment_dir = expand_path(value)
+                self.attachment_dir = self.cfg.effective_attachment_dir
+            elif key == "EDITOR":
+                self.cfg.editor = value
+            elif key == "MODEL_TEST_PROMPT":
+                self.cfg.model_test_prompt = value
+            elif key == "MAX_ATTACHMENT_BYTES":
+                self.cfg.max_attachment_bytes = parse_positive_int(value, self.cfg.max_attachment_bytes)
+            self.status = f"option saved: {key}"
+
+    def open_memory_menu(self) -> None:
+        while True:
+            rows = [
+                "View current memory",
+                "Edit current memory in external editor",
+                "Clear current memory",
+                "Rebuild memory from session log",
+            ]
+            idx = self.select_menu("MEMORY", rows)
+            if idx is None:
+                return
+            if idx == 0:
+                self.show_message("CURRENT MEMORY", self.context_buffer or ["(memory empty)"])
+            elif idx == 1:
+                self.edit_memory_external()
+            elif idx == 2:
+                if self.ask_yes_no("CLEAR MEMORY", "Clear current in-memory context?", default=False):
+                    self.context_buffer = []
+                    self.save_context_snapshot()
+                    self.status = "memory cleared"
+                    return
+            elif idx == 3:
+                self.load_session_into_ui()
+                self.status = "memory rebuilt from log"
+                return
+
+    def edit_memory_external(self) -> None:
+        text = "\n".join(self.context_buffer)
+        edited = self.edit_text_external(text, suffix=".memory.txt")
+        if edited is None:
+            return
+        self.context_buffer = [line for line in edited.splitlines() if line.strip()]
+        self.trim_context_buffer()
+        self.save_context_snapshot()
+        self.status = "memory edited"
+
+    def open_file_menu(self) -> None:
+        while True:
+            rows = [
+                f"Attach file for next message ({len(self.pending_attachments)} pending)",
+                "List pending attachments",
+                "Clear pending attachments",
+                "Browse saved generated/code attachments",
+            ]
+            idx = self.select_menu("FILES", rows)
+            if idx is None:
+                return
+            if idx == 0:
+                self.attach_file_browser(Path.cwd())
+            elif idx == 1:
+                if not self.pending_attachments:
+                    self.show_message("PENDING ATTACHMENTS", ["No pending attachments."])
+                else:
+                    self.show_message(
+                        "PENDING ATTACHMENTS",
+                        [f"{att.path} ({att.mime_type}, {att.size} bytes, {att.mode})" for att in self.pending_attachments],
+                    )
+            elif idx == 2:
+                self.pending_attachments = []
+                self.status = "pending attachments cleared"
+                return
+            elif idx == 3:
+                self.browse_attachment_dir()
+
+    def file_rows(self, directory: Path) -> Tuple[List[str], List[Path]]:
+        entries = []
+        paths = []
+        if directory.parent != directory:
+            entries.append("../")
+            paths.append(directory.parent)
+        for path in sorted(directory.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())):
+            suffix = "/" if path.is_dir() else ""
+            entries.append(path.name + suffix)
+            paths.append(path)
+        return entries, paths
+
+    def attach_file_browser(self, start: Path) -> None:
+        current = start
+        while True:
+            try:
+                rows, paths = self.file_rows(current)
+            except Exception as exc:
+                self.show_message("FILE BROWSER ERROR", [str(exc)])
+                return
+            idx = self.select_menu(f"ATTACH FILE: {current}", rows, "Enter=open/attach | q/Esc=cancel")
+            if idx is None:
+                return
+            selected = paths[idx]
+            if selected.is_dir():
+                current = selected
+                continue
+            self.add_pending_attachment(selected)
             return
 
-        self.cfg.model = model.model_id
-        self.status = f"autoscan activated: {model.model_id}"
-        self.transcript.append(TranscriptItem("system", f"Autoscan activated model: {model.model_id}"))
-        self.maybe_save_model_to_config()
+    def add_pending_attachment(self, path: Path) -> None:
+        try:
+            size = path.stat().st_size
+        except OSError as exc:
+            self.show_message("ATTACH FAILED", [str(exc)])
+            return
+        if size > self.cfg.max_attachment_bytes:
+            self.show_message("ATTACH FAILED", [f"File too large: {size} bytes", f"Limit: {self.cfg.max_attachment_bytes} bytes"])
+            return
+        mime, _encoding = mimetypes.guess_type(str(path))
+        mime = mime or "application/octet-stream"
+        mode = "text" if mime.startswith("text/") or mime in ("application/json", "application/xml") else "inlineData"
+        self.pending_attachments.append(PendingAttachment(path, mime, mode, size))
+        self.status = f"attached for next message: {path.name}"
+
+    def browse_attachment_dir(self) -> None:
+        rows = []
+        paths = []
+        for path in sorted(self.attachment_dir.glob("*")):
+            if path.is_file():
+                rows.append(path.name)
+                paths.append(path)
+        idx = self.select_menu("SAVED ATTACHMENTS", rows, "Enter=view text-ish file | q/Esc=cancel")
+        if idx is None:
+            return
+        path = paths[idx]
+        try:
+            if path.stat().st_size > 200000:
+                self.show_message("ATTACHMENT", [f"File: {path}", "Too large to preview in dialog."])
+                return
+            text = path.read_text(encoding="utf-8", errors="replace")
+            self.show_message(path.name, text.splitlines() or [""])
+        except Exception as exc:
+            self.show_message("ATTACHMENT", [f"File: {path}", str(exc)])
+
+    def edit_text_external(self, initial_text: str, suffix: str = ".txt") -> Optional[str]:
+        editor = self.cfg.effective_editor or shutil.which("nano") or shutil.which("vi")
+        if not editor:
+            self.show_message("EDITOR", ["No editor found. Set EDITOR in config or VISUAL/EDITOR in environment."])
+            return None
+        with tempfile.NamedTemporaryFile("w+", suffix=suffix, delete=False, encoding="utf-8") as tmp:
+            tmp.write(initial_text)
+            tmp_path = tmp.name
+        try:
+            curses.def_prog_mode()
+            curses.endwin()
+            subprocess.run([editor, tmp_path])
+            curses.reset_prog_mode()
+            self.stdscr.keypad(True)
+            with open(tmp_path, "r", encoding="utf-8", errors="replace") as fh:
+                return fh.read()
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+    def open_external_editor_for_input(self) -> None:
+        edited = self.edit_text_external(self.current_input(), suffix=".prompt.txt")
+        if edited is None:
+            return
+        self.input_lines = edited.rstrip("\n").split("\n") or [""]
+        self.cursor_row = len(self.input_lines) - 1
+        self.cursor_col = len(self.input_lines[self.cursor_row])
+        self.status = "input loaded from editor"
 
     # ---------------------------------------------------------------------
     # Input editing
@@ -1378,14 +1734,17 @@ class GeminiCursesApp:
 
     def send_current_message(self) -> None:
         message = self.current_input()
-        if not message.strip():
+        if not message.strip() and not self.pending_attachments:
             self.status = "empty message ignored"
             self.clear_input()
             return
 
         user_time = now_time()
-        self.transcript.append(TranscriptItem(self.username, message, user_time))
-        append_log(self.session_path, self.username, message, user_time)
+        attachment_note = ""
+        if self.pending_attachments:
+            attachment_note = "\n" + "\n".join(f"[attached] {att.path} ({att.mime_type}, {att.size} bytes)" for att in self.pending_attachments)
+        self.transcript.append(TranscriptItem(self.username, message + attachment_note, user_time))
+        append_log(self.session_path, self.username, message + attachment_note, user_time)
         self.clear_input()
         self.transcript_scroll = 0
 
@@ -1394,15 +1753,17 @@ class GeminiCursesApp:
 
         context = self.build_context()
         prompt_text = (context + "\n" if context else "") + "User: " + message
-        raw_output = call_gemini(self.cfg, prompt_text)
+        raw_output = call_gemini(self.cfg, prompt_text, self.pending_attachments, self.attachment_dir, self.session_name)
+        self.pending_attachments = []
 
         gemini_time = now_time()
         append_log(self.session_path, "Gemini", raw_output, gemini_time)
         cleaned_output = extract_attachments(raw_output, self.attachment_dir, self.session_name)
 
-        self.context_buffer.append("User: " + message)
+        self.context_buffer.append("User: " + message + attachment_note)
         self.context_buffer.append("Assistant: " + cleaned_output)
         self.trim_context_buffer()
+        self.save_context_snapshot()
 
         self.transcript.append(TranscriptItem("Gemini", cleaned_output, gemini_time))
         self.status = "response complete"
@@ -1416,27 +1777,39 @@ class GeminiCursesApp:
         if ch == curses.KEY_MOUSE:
             self.handle_mouse()
             return
-
-        if ch in (curses.KEY_F10, 17):  # F10 or Ctrl+Q
+        if ch in (curses.KEY_F10, 17):
             self.should_quit = True
             return
-
+        if ch == curses.KEY_F1:
+            self.show_help()
+            return
         if ch == curses.KEY_F2:
             self.open_model_selector()
             return
-
         if ch == curses.KEY_F3:
-            self.open_api_key_input()
+            self.open_api_key_manager()
             return
-
         if ch == curses.KEY_F4:
-            self.run_autoscan()
+            self.open_sessions_menu()
             return
-
-        if ch in (curses.KEY_F5, 7):  # F5 or Ctrl+G
+        if ch == curses.KEY_F5:
+            self.open_options_menu()
+            return
+        if ch == curses.KEY_F6:
+            self.open_memory_menu()
+            return
+        if ch == curses.KEY_F7:
+            self.open_file_menu()
+            return
+        if ch == curses.KEY_F8:
+            self.open_external_editor_for_input()
+            return
+        if ch == curses.KEY_F9:
+            self.show_credits()
+            return
+        if ch == 7:
             self.send_current_message()
             return
-
         if ch in (10, 13, curses.KEY_ENTER):
             self.insert_newline()
         elif ch in (curses.KEY_BACKSPACE, 127, 8):
@@ -1459,11 +1832,11 @@ class GeminiCursesApp:
             self.transcript_scroll += 10
         elif ch == curses.KEY_NPAGE:
             self.transcript_scroll = max(0, self.transcript_scroll - 10)
-        elif ch == 21:  # Ctrl+U clears current input
+        elif ch == 21:
             self.clear_input()
-        elif ch == 12:  # Ctrl+L redraw
+        elif ch == 12:
             pass
-        elif ch == 9:  # tab inserts indentation
+        elif ch == 9:
             self.insert_text("    ")
         elif 32 <= ch <= 126:
             self.insert_text(chr(ch))
@@ -1473,22 +1846,16 @@ class GeminiCursesApp:
         curses.noecho()
         curses.cbreak()
         stdscr.keypad(True)
-
-        # Enable mouse events. BUTTON4/BUTTON5 are commonly used by terminals
-        # for mousewheel up/down. REPORT_MOUSE_POSITION is requested where the
-        # curses implementation supports it, but drag tracking is not required.
-        mouse_mask = curses.ALL_MOUSE_EVENTS
-        mouse_mask |= getattr(curses, "REPORT_MOUSE_POSITION", 0)
         try:
-            curses.mousemask(mouse_mask)
+            curses.mousemask(curses.ALL_MOUSE_EVENTS | getattr(curses, "REPORT_MOUSE_POSITION", 0))
         except curses.error:
             pass
 
         self.load_session_into_ui()
         if not self.cfg.api_key:
-            self.status = "No API key loaded. Press F3 to paste one."
+            self.status = "No API key loaded. Press F3."
         elif not self.cfg.model:
-            self.status = "No MODEL configured. Press F4 to autoscan or F2 to choose."
+            self.status = "No MODEL configured. Press F2 to choose/test a model."
 
         while not self.should_quit:
             self.draw()
@@ -1520,13 +1887,10 @@ def main() -> int:
     if args.list:
         list_sessions(session_dir)
         return 0
-
     if args.models:
         return print_models(cfg)
-
-    if args.autoscan_model:
-        return print_autoscan_model(cfg)
-
+    if args.test_model:
+        return print_test_model(cfg, args.test_model)
     if args.resume and args.session_name:
         print("error: use either a session name or --resume, not both", file=sys.stderr)
         return 2
