@@ -33,7 +33,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-VERSION = "0.6.1"
+VERSION = "0.6.2"
 PROGRAM = "gemini-curses"
 FALLBACK_MODEL = "gemini-2.5-flash"
 DEFAULT_MODEL_TEST_PROMPT = "Please reply with one short sentence confirming this model is available for text generation."
@@ -670,6 +670,8 @@ class GeminiCursesApp:
 
         self.layout: dict[str, int] = {}
         self.last_input_segments: List[InputSegment] = []
+        self.command_hotspots: List[Tuple[int, int, int, str]] = []
+        self.command_click_targets: List[Tuple[int, int, str]] = []
 
         self.status = self.default_status()
         self.should_quit = False
@@ -740,6 +742,14 @@ class GeminiCursesApp:
 
     def reverse_attr(self) -> int:
         return curses.A_REVERSE
+
+    def attr_header(self) -> int:
+        # Compatibility helper for menus that use header-style reverse video.
+        return self.reverse_attr()
+
+    def attr_dim(self) -> int:
+        # Compatibility helper for menus that use dim/grey metadata styling.
+        return self.dim_attr()
 
     def transcript_attr_for(self, speaker: str) -> int:
         if self.cfg.monochrome:
@@ -837,10 +847,40 @@ class GeminiCursesApp:
 
         return segments or [InputSegment("> ", 0, 0, max(1, width - 2))], cursor_visual_index, cursor_x
 
+    def command_bar_items(self) -> List[Tuple[str, str]]:
+        return [
+            ("F1 Help", "help"),
+            ("F2 Models", "models"),
+            ("F3 Key", "api-key"),
+            ("F4 Sessions", "sessions"),
+            ("F5 Options", "options"),
+            ("F6 Memory", "memory"),
+            ("F7 Files", "files"),
+            ("F8 Editor", "editor"),
+            ("F9 Credits", "credits"),
+        ]
+
+    def draw_command_bar(self, y: int, width: int) -> None:
+        # This compact command strip sits between transcript and input. It is
+        # intentionally clipped to the available terminal width; only visible
+        # labels are clickable. F1 opens the full command menu for all actions.
+        self.command_click_targets = []
+        self.safe_addstr(y, 0, "_" * width, width, self.dim_attr())
+        x = 0
+        for idx, (label, action) in enumerate(self.command_bar_items()):
+            text = label if idx == 0 else " | " + label
+            if x + len(text) >= width:
+                if x + 4 < width:
+                    self.safe_addstr(y, x, " ...", width - x, self.dim_attr())
+                break
+            self.safe_addstr(y, x, text, width - x, self.dim_attr())
+            label_start = x + (3 if idx else 0)
+            label_end = label_start + len(label)
+            self.command_click_targets.append((label_start, label_end, action))
+            x += len(text)
+
     def draw_input(self, label_y: int, input_y: int, width: int) -> None:
-        label = "INPUT: Enter=newline | Ctrl+G send | F1 menu | F8 editor"
-        self.safe_addstr(label_y, 0, "_" * width, width, self.dim_attr())
-        self.safe_addstr(label_y, 0, label, width, self.dim_attr())
+        self.draw_command_bar(label_y, width)
 
         segments, cursor_visual_index, cursor_x = self.input_segments(width)
         self.last_input_segments = segments
@@ -902,6 +942,7 @@ class GeminiCursesApp:
             "transcript_y": transcript_y,
             "transcript_h": transcript_h,
             "input_label_y": input_label_y,
+            "command_y": input_label_y,
             "input_y": input_y,
             "input_h": self.INPUT_HEIGHT,
             "status_y": status_y,
@@ -951,6 +992,13 @@ class GeminiCursesApp:
         if not self.layout:
             return
         if self.mouse_button1(state):
+            label_y = self.layout.get("input_label_y", -1)
+            if y == label_y:
+                for start, end, action in self.command_click_targets:
+                    if start <= x < end:
+                        self.dispatch_command_action(action)
+                        return
+
             input_y = self.layout.get("input_y", -1)
             input_h = self.layout.get("input_h", 0)
             if input_y <= y < input_y + input_h:
@@ -1141,23 +1189,140 @@ class GeminiCursesApp:
     # High-level feature screens
     # ------------------------------------------------------------------
 
+    def command_items(self) -> List[Tuple[str, str, str]]:
+        return [
+            ("F1", "Help / command menu", "noop"),
+            ("F2", "Models: list, inspect, test, activate, save", "models"),
+            ("F3", "API key manager", "api_key"),
+            ("F4", "Sessions: browse, open, create, rename", "sessions"),
+            ("F5", "Options: edit config-backed settings", "options"),
+            ("F6", "Memory: view, edit, clear, rebuild", "memory"),
+            ("F7", "Files: attach local files, browse saved attachments", "files"),
+            ("F8", "External editor for current prompt", "editor"),
+            ("F9", "Credits / about", "credits"),
+            ("Ctrl+G", "Send current message", "send"),
+            ("F10", "Quit", "quit"),
+        ]
+
+    def run_command(self, action: str) -> None:
+        if action == "noop":
+            return
+        if action == "help":
+            self.open_help()
+        elif action == "models":
+            self.open_model_selector()
+        elif action == "api_key":
+            self.open_api_key_input()
+        elif action == "sessions":
+            self.open_session_browser()
+        elif action == "options":
+            self.open_options_menu()
+        elif action == "memory":
+            self.open_memory_menu()
+        elif action == "files":
+            self.open_file_menu()
+        elif action == "editor":
+            self.open_external_editor_for_input()
+        elif action == "credits":
+            self.open_credits()
+        elif action == "send":
+            self.send_current_message()
+        elif action == "quit":
+            self.should_quit = True
+
     def open_help(self) -> None:
-        self.show_message("F1 HELP / COMMAND MENU", [
-            "F1  Help / command menu",
-            "F2  Models: list, inspect, test, activate, save",
-            "F3  API key manager",
-            "F4  Sessions: browse, open, create, rename",
-            "F5  Options: edit config-backed settings",
-            "F6  Memory: view, edit, clear, rebuild",
-            "F7  Files: attach local files, browse saved attachments",
-            "F8  External editor for current prompt",
-            "F9  Credits / about",
-            "F10 or Ctrl+Q  Quit",
-            "",
-            "Ctrl+G or F5 sends the current message. Enter inserts a newline.",
-            "Mousewheel scrolls transcript and lists. Left-click input places cursor.",
-            "The compact footer intentionally shows only the essential commands on low-resolution terminals.",
-        ])
+        # F1 is now an actionable command menu, not only a static help page.
+        # Function keys work while this menu is open, Enter launches the
+        # highlighted command, and mouse clicks launch rows directly.
+        selected = 0
+        top_index = 0
+        items = self.command_items()
+        while True:
+            self.stdscr.erase()
+            height, width = self.stdscr.getmaxyx()
+            visible_h = max(1, height - 7)
+            self.safe_addstr(0, 0, "F1 HELP / COMMAND MENU", width, self.reverse_attr())
+            self.safe_addstr(1, 0, "Enter/click=launch | F2-F10 work here | Ctrl+G=send | Esc/q=return", width, self.dim_attr())
+            self.safe_addstr(2, 0, "_" * width, width, self.dim_attr())
+
+            if selected < top_index:
+                top_index = selected
+            elif selected >= top_index + visible_h:
+                top_index = selected - visible_h + 1
+
+            for row in range(visible_h):
+                idx = top_index + row
+                if idx >= len(items):
+                    break
+                key, desc, action = items[idx]
+                attr = self.reverse_attr() if idx == selected else 0
+                self.safe_addstr(3 + row, 0, f"{key:<8} {desc}", width, attr)
+
+            footer = "Mousewheel/PgUp/PgDn=scroll | Enter/click=launch | q/Esc=return"
+            self.safe_addstr(height - 2, 0, "_" * width, width, self.dim_attr())
+            self.safe_addstr(height - 1, 0, footer, width, self.reverse_attr())
+            self.stdscr.refresh()
+
+            ch = self.stdscr.getch()
+            if ch == curses.KEY_MOUSE:
+                try:
+                    _mid, _x, y, _z, state = curses.getmouse()
+                except curses.error:
+                    continue
+                delta = self.mouse_wheel_delta(state)
+                if delta > 0:
+                    selected = max(0, selected - MOUSE_SCROLL_LINES)
+                    continue
+                if delta < 0:
+                    selected = min(len(items) - 1, selected + MOUSE_SCROLL_LINES)
+                    continue
+                if self.mouse_button1(state) and 3 <= y < 3 + visible_h:
+                    idx = top_index + (y - 3)
+                    if 0 <= idx < len(items):
+                        selected = idx
+                        self.run_command(items[selected][2])
+                        return
+                continue
+
+            if ch in (27, ord("q"), ord("Q")):
+                return
+            if ch == curses.KEY_UP:
+                selected = max(0, selected - 1)
+            elif ch == curses.KEY_DOWN:
+                selected = min(len(items) - 1, selected + 1)
+            elif ch == curses.KEY_PPAGE:
+                selected = max(0, selected - visible_h)
+            elif ch == curses.KEY_NPAGE:
+                selected = min(len(items) - 1, selected + visible_h)
+            elif ch == curses.KEY_HOME:
+                selected = 0
+            elif ch == curses.KEY_END:
+                selected = len(items) - 1
+            elif ch in (10, 13, curses.KEY_ENTER):
+                self.run_command(items[selected][2])
+                return
+            elif ch == curses.KEY_F1:
+                continue
+            elif ch == curses.KEY_F2:
+                self.run_command("models"); return
+            elif ch == curses.KEY_F3:
+                self.run_command("api_key"); return
+            elif ch == curses.KEY_F4:
+                self.run_command("sessions"); return
+            elif ch == curses.KEY_F5:
+                self.run_command("options"); return
+            elif ch == curses.KEY_F6:
+                self.run_command("memory"); return
+            elif ch == curses.KEY_F7:
+                self.run_command("files"); return
+            elif ch == curses.KEY_F8:
+                self.run_command("editor"); return
+            elif ch == curses.KEY_F9:
+                self.run_command("credits"); return
+            elif ch in (curses.KEY_F10, 17):
+                self.run_command("quit"); return
+            elif ch == 7:
+                self.run_command("send"); return
 
     def open_credits(self) -> None:
         self.show_message("CREDITS", [
@@ -1428,9 +1593,9 @@ class GeminiCursesApp:
             self.stdscr.erase()
             height, width = self.stdscr.getmaxyx()
             visible_h = max(1, height - 4)
-            self.safe_addstr(0, 0, "OPTIONS MENU", width, self.attr_header())
-            self.safe_addstr(1, 0, "Enter=edit/save | Esc/q=cancel | API key is handled by F3 | wheel=scroll", width, self.attr_dim())
-            self.safe_addstr(2, 0, "_" * width, width, self.attr_dim())
+            self.safe_addstr(0, 0, "OPTIONS MENU", width, self.reverse_attr())
+            self.safe_addstr(1, 0, "Enter=edit/save | Esc/q=cancel | API key is handled by F3 | wheel=scroll", width, self.dim_attr())
+            self.safe_addstr(2, 0, "_" * width, width, self.dim_attr())
             if selected < top_index:
                 top_index = selected
             elif selected >= top_index + visible_h:
@@ -1440,7 +1605,7 @@ class GeminiCursesApp:
                 if idx >= len(options):
                     break
                 key, value = options[idx]
-                attr = self.attr_header() if idx == selected else 0
+                attr = self.reverse_attr() if idx == selected else 0
                 self.safe_addstr(3 + row, 0, f"{key}={value}", width, attr)
             self.stdscr.refresh()
             ch = self.stdscr.getch()
@@ -1596,13 +1761,13 @@ class GeminiCursesApp:
         while True:
             self.stdscr.erase()
             height, width = self.stdscr.getmaxyx()
-            self.safe_addstr(0, 0, "FILES / ATTACHMENTS", width, self.attr_header())
+            self.safe_addstr(0, 0, "FILES / ATTACHMENTS", width, self.reverse_attr())
             self.safe_addstr(1, 0, f"Pending files: {len(self.pending_attachments)}", width)
-            self.safe_addstr(2, 0, "Enter=select | Esc/q=cancel | wheel=move", width, self.attr_dim())
-            self.safe_addstr(3, 0, "_" * width, width, self.attr_dim())
+            self.safe_addstr(2, 0, "Enter=select | Esc/q=cancel | wheel=move", width, self.dim_attr())
+            self.safe_addstr(3, 0, "_" * width, width, self.dim_attr())
             visible_h = max(1, height - 5)
             for row, (_key, label) in enumerate(choices[:visible_h]):
-                attr = self.attr_header() if row == selected else 0
+                attr = self.reverse_attr() if row == selected else 0
                 self.safe_addstr(4 + row, 0, f"{_key}  {label}", width, attr)
             self.stdscr.refresh()
 
@@ -1759,21 +1924,67 @@ class GeminiCursesApp:
         self.status = "response complete"
 
     # ------------------------------------------------------------------
+    # Command dispatch
+    # ------------------------------------------------------------------
+
+    def action_for_function_key(self, ch: int) -> Optional[str]:
+        mapping = {
+            curses.KEY_F1: "help",
+            curses.KEY_F2: "models",
+            curses.KEY_F3: "api-key",
+            curses.KEY_F4: "sessions",
+            curses.KEY_F5: "options",
+            curses.KEY_F6: "memory",
+            curses.KEY_F7: "files",
+            curses.KEY_F8: "editor",
+            curses.KEY_F9: "credits",
+            curses.KEY_F10: "quit",
+        }
+        return mapping.get(ch)
+
+    def dispatch_command_action(self, action: str) -> None:
+        if action == "help":
+            self.open_help()
+        elif action == "models":
+            self.open_model_selector()
+        elif action == "api-key":
+            self.open_api_key_input()
+        elif action == "sessions":
+            self.open_session_browser()
+        elif action == "options":
+            self.open_options_menu()
+        elif action == "memory":
+            self.open_memory_menu()
+        elif action == "files":
+            self.open_file_menu()
+        elif action == "editor":
+            self.open_external_editor_for_input()
+        elif action == "credits":
+            self.open_credits()
+        elif action == "quit":
+            self.should_quit = True
+
+    # ------------------------------------------------------------------
     # Main event loop
     # ------------------------------------------------------------------
 
     def handle_key(self, ch: int) -> None:
-        if ch == curses.KEY_MOUSE: self.handle_mouse(); return
-        if ch == curses.KEY_F1: self.open_help(); return
-        if ch == curses.KEY_F2: self.open_model_selector(); return
-        if ch == curses.KEY_F3: self.open_api_key_input(); return
-        if ch == curses.KEY_F4: self.open_session_browser(); return
-        if ch == curses.KEY_F5 or ch == 7: self.send_current_message(); return
-        if ch == curses.KEY_F6: self.open_memory_menu(); return
-        if ch == curses.KEY_F7: self.open_file_menu(); return
-        if ch == curses.KEY_F8: self.open_external_editor_for_input(); return
-        if ch == curses.KEY_F9: self.open_credits(); return
-        if ch in (curses.KEY_F10, 17): self.should_quit = True; return
+        if ch == curses.KEY_MOUSE:
+            self.handle_mouse()
+            return
+
+        action = self.action_for_function_key(ch)
+        if action:
+            self.dispatch_command_action(action)
+            return
+
+        if ch == 7:  # Ctrl+G sends. F5 is Options, not send.
+            self.send_current_message()
+            return
+
+        if ch == 17:  # Ctrl+Q
+            self.should_quit = True
+            return
         if ch in (10, 13, curses.KEY_ENTER): self.insert_newline()
         elif ch in (curses.KEY_BACKSPACE, 127, 8): self.backspace()
         elif ch == curses.KEY_DC: self.delete_forward()
