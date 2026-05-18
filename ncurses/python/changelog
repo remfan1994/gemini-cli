@@ -1,4 +1,47 @@
 # Changelog
+## 0.7.0
+
+### Added
+- Model list cache stored at `~/.config/gemini-cli/models-cache.json`
+- `--update-models` command-line option for explicitly refreshing the model cache from Google
+- Cached model-list behavior for `--models`
+- F2 model landing menu that does not immediately contact Google
+- Explicit "Use cached model list" action in F2 model menu
+- Explicit "Update model list from Google" action in F2 model menu
+- Manual model ID entry action in F2 model menu
+- Current/fallback model test action in F2 model menu
+- Save-current-model action in F2 model menu
+- Global function-key navigation from feature screens and dialogs
+- w3m-style options form
+- Options form boolean toggles with Space
+- Options form staged save/cancel/reset behavior
+- Tab navigation in the options form
+
+### Changed
+- Pressing F2 no longer fetches Google's model list automatically
+- Network access for model-list retrieval now requires explicit user action
+- Model selector workflow is now cache-first and update-on-demand
+- `--models` now prefers the local model cache and only fetches when no cache exists
+- Options are now edited in a single form instead of as individual config-file-like entries
+- GitHub/project URL is no longer exposed as an editable option
+- Function keys now behave as global navigation across menus and feature screens
+- F1 command menu, visible command strip, and feature screens now behave more like launchers
+
+### Documentation
+- Updated man page synopsis with `--update-models`
+- Added MODEL CACHE section
+- Updated MODEL DISCOVERY section
+- Updated CONTROLS section
+- Added GLOBAL FUNCTION-KEY NAVIGATION section
+- Added OPTIONS FORM section
+- Updated FILES section with model cache path
+- Updated LIMITATIONS section with stale-cache note
+
+### Notes
+- This release focuses on UI stabilization and reducing accidental network/API calls.
+- The model cache can become stale; users should run `--update-models` or choose "Update model list from Google" in F2 when needed.
+- Drag selection remains the terminal emulator's responsibility.
+
 ## 0.6.2
 
 ### Fixed
