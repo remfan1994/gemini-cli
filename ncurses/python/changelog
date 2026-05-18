@@ -1,4 +1,39 @@
 # Changelog
+## 0.6.2
+
+### Fixed
+- Fixed F5 incorrectly sending the current message instead of opening Options
+- Removed F5 as an alternate send shortcut
+- Ctrl+G is now the sole send shortcut
+- Fixed the "empty message ignored" behavior when users tried to open Options with F5
+
+### Added
+- Actionable F1 command menu
+- Function keys now launch their features while the F1 menu is open
+- Enter on a highlighted F1 menu row launches that command
+- Mouse click on a F1 menu row launches that command
+- Mousewheel support inside the F1 command menu
+- Clickable command strip between the transcript and input field
+- Visible command-strip labels now launch their corresponding commands when clicked
+- Low-resolution-safe command strip truncation with ellipsis instead of half-cut command labels
+
+### Changed
+- The command strip is now rendered from clickable command entries instead of one static help sentence
+- The main footer now advertises F5 as Options instead of send
+- F1 help is now a command launcher, not just a passive help page
+- Man page control documentation now reflects Ctrl+G-only send behavior
+
+### Documentation
+- Updated CONTROLS section for F5 Options and Ctrl+G send
+- Added F1 command menu behavior
+- Added clickable command-strip behavior
+- Updated MOUSE SUPPORT section
+- Updated LIMITATIONS section to remove old F5 conflict language
+
+### Notes
+- Drag selection remains intentionally delegated to the terminal emulator.
+- Only visible command-strip labels are clickable; F1 remains the complete command launcher on small terminals.
+
 ## 0.6.1
 
 ### Added
