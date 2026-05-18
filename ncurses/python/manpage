@@ -9,6 +9,7 @@ SYNOPSIS
     gemini-curses --resume <session_name>
     gemini-curses --list
     gemini-curses --models
+    gemini-curses --update-models
     gemini-curses --test-model <model_id>
     gemini-curses --version
     gemini-curses --help
@@ -21,43 +22,35 @@ DESCRIPTION
         - scrollable transcript area
         - multiline input box
         - wrapped input display
-        - input placeholder text
-        - monochrome display mode
-        - compact low-resolution-safe command strip
-        - clickable command strip labels
-        - actionable F1 command menu
-        - proper cursor movement
         - mousewheel scrolling
         - mouse-assisted input cursor placement
-        - mouse-assisted model selection
         - named and resumable sessions
-        - session browsing and session renaming
+        - session rename support
+        - session file browser
         - timestamped logs
         - rolling conversation context
-        - explicit context snapshots saved in session logs
-        - view/edit/clear/rebuild memory tools
+        - memory snapshot storage in session logs
+        - view/edit current memory
         - attachment extraction for code blocks
-        - file attachment support for outgoing Gemini requests
-        - response inline attachment saving where returned by the API
-        - in-app model selection and model testing
-        - in-app API key entry with runtime-only default behavior
-        - options menu for editable config keys
+        - local file attachment support
+        - generated inlineData attachment saving
+        - cached model list support
+        - explicit model-list update workflow
+        - in-app model selection
+        - user-operated model testing
+        - in-app API key management
+        - w3m-style options form
         - external editor support
         - credits/about screen
-        - temporary project-lead startup notice in new blank sessions
 
 USAGE
     First-time setup from inside the interface:
 
         gemini-curses
             Press F3 to paste an API key.
-            Press F2 to list models, highlight one, and press t to test it.
-            Activate or save the model after reading the test response.
-
-    First-time setup from the shell:
-
-        gemini-curses --models
-        gemini-curses --test-model <model_id>
+            Press F2 to open the model menu.
+            Choose "Update model list from Google" only when ready.
+            Choose or test a model.
 
     Start a normal timestamped chat:
 
@@ -75,7 +68,15 @@ USAGE
 
         gemini-curses --list
 
-    Test a model from the shell:
+    List cached Gemini models, fetching only if no cache exists:
+
+        gemini-curses --models
+
+    Force-refresh the local model cache from Google:
+
+        gemini-curses --update-models
+
+    Test one model from the shell:
 
         gemini-curses --test-model gemini-2.5-flash
 
@@ -94,82 +95,13 @@ SESSION MANAGEMENT
         List saved sessions.
 
     F4
-        Open the session browser. The browser can switch sessions, rename
-        highlighted sessions, or rename the current session.
-
-DISPLAY AND LOW-RESOLUTION BEHAVIOR
-    The main chat view uses a compact command strip between the transcript
-    and the input field. The strip is designed to avoid half-cut labels on
-    low-resolution terminals.
-
-    Visible command-strip labels are clickable. Labels that do not fit are
-    not drawn; press F1 for the complete command menu.
-
-    F1 opens a full-screen actionable command menu. From the F1 menu, users
-    may launch features by pressing their function key, by highlighting a row
-    and pressing Enter, or by clicking a row.
-
-    Long help, credits, and error messages are shown as full-screen scrollable
-    pages. These pages support PgUp, PgDn, mousewheel scrolling, q, and Esc.
-
-    New blank sessions may show a temporary transcript notice from
-    remfan1994. This notice is not written to the session log, is not sent to
-    Gemini, and disappears when the first user message is sent.
-
-    The input box displays placeholder text when empty. The placeholder is
-    visual only and is not part of the prompt.
-
-    By default, user transcript messages are drawn dim/grey and Gemini output
-    is drawn normally. Text being typed in the input box is drawn normally.
-
-    Set MONOCHROME=1 in the config file to avoid dim/grey styling.
-
-MODEL DISCOVERY AND TESTING
-    Available Gemini models can be listed from the command line:
-
-        gemini-curses --models
-
-    They can also be listed directly with curl:
-
-        curl "https://generativelanguage.googleapis.com/v1beta/models?key=YOUR_API_KEY"
-
-    Inside the ncurses interface, press F2 to open the model selector.
-
-    Autoscan has been removed. gemini-curses no longer probes each model until
-    one works. Instead, the user chooses a model and explicitly tests it.
-
-    From inside the selector:
-
-        t
-            Test highlighted model with MODEL_TEST_PROMPT.
-
-        i
-            Show model metadata.
-
-        Enter
-            Activate highlighted model for the current run.
-
-        s
-            Save highlighted model to config.
-
-    From the shell:
-
-        gemini-curses --test-model <model_id>
-
-    The default model-test prompt is:
-
-        Please reply with one short sentence confirming this model is available
-        for text generation.
+        Open the in-app session browser. The session browser can open an
+        existing session, start a new timestamped session, or rename the
+        current session.
 
 CONTROLS
     F1
-        Show the full-screen actionable help / command menu.
-
-        Inside the F1 menu:
-            - function keys launch their features
-            - Enter launches the highlighted row
-            - mouse click launches the clicked row
-            - q or Esc returns to the chat
+        Open the actionable command menu.
 
     Enter
         Insert newline in the input box.
@@ -178,17 +110,23 @@ CONTROLS
         Send the current message.
 
     F2
-        Open model selector and tester.
+        Open the model menu. This does not automatically contact Google.
+
+        The model menu can:
+            - use the cached model list
+            - update the model list from Google
+            - test the current/fallback model
+            - enter a model ID manually
+            - save the current model to config
 
     F3
-        Open API-key input. The pasted key is runtime-only by default. Saving
-        to config requires explicit confirmation.
+        Open API-key manager.
 
     F4
         Open session browser.
 
     F5
-        Open options menu.
+        Open options form.
 
     F6
         Open memory menu.
@@ -197,7 +135,7 @@ CONTROLS
         Open file/attachment menu.
 
     F8
-        Open current input in external editor.
+        Edit current prompt in external editor.
 
     F9
         Show credits/about screen.
@@ -226,7 +164,25 @@ CONTROLS
         Redraw screen.
 
     Tab
-        Insert four spaces.
+        Insert four spaces in the input box. In the options form, Tab moves
+        to the next field.
+
+GLOBAL FUNCTION-KEY NAVIGATION
+    Function keys are global navigation keys.
+
+    When a feature screen, menu, error page, or dialog is open, pressing
+    another function key jumps directly to that feature without requiring the
+    user to press Esc first.
+
+    Examples:
+        F1 -> F5
+            Open help, then jump directly to options.
+
+        F2 -> F3
+            Open model menu, then jump directly to API-key manager.
+
+    This behavior is intended to make the command menu and function-key bar
+    behave as launchers, not merely as labels.
 
 MOUSE SUPPORT
     Mouse support depends on terminal emulator support for ncurses mouse
@@ -234,56 +190,123 @@ MOUSE SUPPORT
 
     Main chat view:
 
-        Mouse wheel up/down
-            Scroll transcript.
+        Mouse wheel up
+            Scroll transcript upward toward older output.
+
+        Mouse wheel down
+            Scroll transcript downward toward newer output.
 
         Left click in input area
             Place the input cursor near the clicked position.
 
-        Left click visible command-strip label
+        Left click visible command labels
             Launch that command.
 
-    F1 command menu:
+    Lists and selectors:
 
         Mouse wheel up/down
-            Move through the command list.
+            Move through visible rows.
 
         Left click row
-            Launch the clicked command.
+            Highlight or select the clicked row.
 
-    Model selector:
+        Double click row
+            Activate the clicked row where supported.
 
-        Mouse wheel up/down
-            Move through the model list.
+    Drag selection is not implemented by gemini-curses. Terminal text
+    selection remains the terminal emulator's responsibility.
 
-        Left click on a model row
-            Highlight that model.
+MODEL DISCOVERY
+    Available Gemini models can be listed from the command line:
 
-        Double click on a model row
-            Activate that model.
+        gemini-curses --models
 
-    Terminal text selection remains the terminal emulator's responsibility.
-    Drag selection is not implemented by gemini-curses.
+    The --models command uses the local model cache if available. If no cache
+    exists, it fetches the list from Google and creates the cache.
 
-API KEY BEHAVIOR
-    API keys may be supplied by environment variable:
+    To force-refresh the cache:
 
-        export GEMINI_API_KEY=your_key
+        gemini-curses --update-models
 
-    They may also be placed in the config file:
+    Models can also be listed directly with curl:
 
-        GEMINI_API_KEY=your_key
+        curl "https://generativelanguage.googleapis.com/v1beta/models?key=YOUR_API_KEY"
 
-    Inside the interface, F3 prompts for an API key. The key is runtime-only by
-    default. Saving it to config requires explicit confirmation. The program
-    can also forget the runtime key on request.
+MODEL CACHE
+    The model cache is stored in the config directory as:
 
-    Saving the API key stores it in plaintext.
+        ~/.config/gemini-cli/models-cache.json
+
+    F2 does not automatically hit the network.
+
+    Inside the model menu:
+
+        Use cached model list
+            Opens the local cache if available.
+
+        Update model list from Google
+            Explicitly fetches the model list from Google and updates the
+            cache.
+
+    This avoids accidental network/API calls when the user merely presses F2.
+
+MODEL TESTING
+    Autoscan has been removed.
+
+    Instead of probing every model until one works, gemini-curses now uses a
+    user-operated model tester.
+
+    In the model list:
+
+        t
+            Test the selected model with MODEL_TEST_PROMPT and display the
+            raw response.
+
+    From the shell:
+
+        gemini-curses --test-model <model_id>
+
+    The tester sends one request to the selected model. The user reads the
+    response and decides whether to activate or save the model.
+
+OPTIONS FORM
+    F5 opens a w3m-style options form.
+
+    The options form shows all editable config-backed values together instead
+    of opening a separate blank screen for every option.
+
+    Controls:
+        Space
+            Toggle boolean fields.
+
+        Enter
+            Edit text, integer, or path fields.
+
+        Tab
+            Move to the next field.
+
+        s
+            Save all staged changes.
+
+        r
+            Reset the form from current runtime values.
+
+        Esc/q
+            Cancel. If changes are unsaved, the user is asked before
+            discarding.
+
+    API keys are not edited in the options form. Use F3.
+
+    Project metadata such as the GitHub URL is not edited in the options form.
+    Use F9 to view credits/about information.
 
 CONFIGURATION
     Configuration file:
 
         ~/.config/gemini-cli/config
+
+    The ncurses version intentionally uses the same configuration file as
+    the Bash version.
 
     Supported keys:
 
@@ -292,57 +315,88 @@ CONFIGURATION
 
         CONTEXT_TURNS
             Number of recent user/assistant exchanges sent back to Gemini as
-            conversation context. Default: 12
+            conversation context.
+
+            Default: 12
 
         HISTORY_LIMIT
-            Legacy alias for CONTEXT_TURNS.
+            Legacy alias for CONTEXT_TURNS. Kept for compatibility with older
+            config files.
 
         GEMINI_API_KEY
             Optional API key. Environment variable takes priority.
 
         SESSION_DIR
-            Directory used for session log storage. Default: ~/.gpt
+            Directory used for session log storage.
+            Default: ~/.gpt
 
         ATTACHMENT_DIR
-            Directory used for extracted code artifacts and response
-            attachments. Default: SESSION_DIR/attachments
+            Directory used for extracted code artifacts and generated inline
+            attachments.
+            Default: SESSION_DIR/attachments
 
         EDITOR
             External editor command used by F8 and memory editing.
 
-        GITHUB_URL
-            URL displayed in the credits/about screen.
-
         MODEL_TEST_PROMPT
-            Prompt used when testing a selected model.
-
-        MONOCHROME
-            Disable dim/grey styling when set to 1. Default: 0
+            Prompt sent by the model tester.
 
         INPUT_PLACEHOLDER
-            Placeholder text shown in the empty input box.
-            Default: Type your chat message here...
+            Placeholder displayed in the empty input field.
 
-        STARTUP_NOTICE
-            Show the temporary remfan1994 project-lead notice in blank new
-            sessions when set to 1. Default: 1
-
-OPTIONS MENU
-    F5 opens the options menu. Editable config-backed values include:
-
-        MODEL
-        CONTEXT_TURNS
-        SESSION_DIR
-        ATTACHMENT_DIR
-        EDITOR
-        GITHUB_URL
-        MODEL_TEST_PROMPT
         MONOCHROME
-        INPUT_PLACEHOLDER
-        STARTUP_NOTICE
+            If enabled, avoids relying on dim/grey display distinctions.
 
-    API-key handling is intentionally kept in F3 because saving secrets should
-    be an explicit workflow.
+        STARTUP_NOTICE
+            Controls the temporary remfan1994 startup notice in blank new
+            sessions.
+
+ENVIRONMENT
+    GEMINI_API_KEY
+        Preferred API key source.
+
+        Precedence:
+            1. Environment variable
+            2. Config file
+            3. F3 runtime API-key input
+
+    VISUAL
+    EDITOR
+        Used for external editor support if EDITOR is not set in config.
+
+API KEY STORAGE
+    API keys are not saved by default when pasted with F3.
+
+    Saving the API key to config is optional and must be selected explicitly.
+    Saving stores the key in plaintext.
+
+FILES
+    ~/.config/gemini-cli/config
+        Configuration file.
+
+    ~/.config/gemini-cli/models-cache.json
+        Cached Gemini model list.
+
+    SESSION_DIR/*.log
+        Session log files.
+
+    ATTACHMENT_DIR/
+        Extracted code block attachments, generated inlineData attachments,
+        and other saved artifacts.
+
+ATTACHMENT SYSTEM
+    Code blocks returned by Gemini are extracted from terminal display and
+    saved into ATTACHMENT_DIR.
+
+    The original raw Gemini response remains preserved in the session log.
+
+    Local files can be attached to the next prompt through F7.
+
+    Text-like files are included as text parts. Binary/media files are sent as
+    Gemini REST inlineData parts when possible.
+
+    Generated inlineData parts returned by Gemini are saved into ATTACHMENT_DIR
+    and represented in the transcript by attachment notices.
 
 MEMORY MODEL
     gemini-curses keeps a rolling conversation context in memory.
@@ -350,103 +404,40 @@ MEMORY MODEL
     CONTEXT_TURNS controls how many recent user/assistant exchanges are sent
     back to Gemini with each request.
 
-    The session log remains the permanent archive. The context buffer is the
-    recent window sent back to Gemini.
+    Memory snapshots are written into the session log as system entries.
+    When resuming an existing session, gemini-curses prefers the latest memory
+    snapshot and falls back to rebuilding context from recent chat entries.
 
-    gemini-curses writes context snapshots into session logs as system
-    records. These records allow memory state to be recovered more explicitly
-    than by reconstructing only from transcript text.
-
-    F6 opens the memory menu:
-
-        v
-            View current memory.
-
-        e
-            Edit current memory in external editor.
-
-        c
-            Clear current memory.
-
-        r
-            Rebuild memory from session log.
+    F6 opens the memory menu. The memory menu can view, edit, clear, or rebuild
+    current memory.
 
 EXTERNAL EDITOR
-    F8 opens the current input in an external editor.
+    F8 opens the current prompt in an external editor.
 
-    Editor selection order:
-
+    The editor is chosen in this order:
         1. EDITOR config key
         2. VISUAL environment variable
         3. EDITOR environment variable
-        4. vi
-
-    This follows the general style of tools such as mutt, where longer input
-    can be composed in the user's preferred editor.
-
-FILE ATTACHMENTS
-    F7 opens the file/attachment menu.
-
-    The menu can:
-        - attach a file to the next Gemini request
-        - list pending files
-        - clear pending files
-        - browse saved attachment directory
-
-    Text files are sent as text parts. Other files are sent as inline_data
-    parts with detected MIME types when they are small enough for inline send.
-
-    Very large files are skipped and noted in the request.
-
-ATTACHMENT SYSTEM
-    Markdown fenced code blocks returned by Gemini are extracted from terminal
-    display and saved into ATTACHMENT_DIR.
-
-    The original raw Gemini response remains preserved in the session log.
-
-    File names follow this pattern:
-
-        <session>-<type>-NN.<extension>
-
-    Response inline attachments, if returned by the API, are also saved in
-    ATTACHMENT_DIR.
-
-FILES
-    ~/.config/gemini-cli/config
-        Configuration file.
-
-    SESSION_DIR/*.log
-        Session log files.
-
-    ATTACHMENT_DIR/
-        Extracted code blocks, outgoing artifacts, and received inline files.
+        4. vi fallback
 
 CREDITS
-    F9 displays project credits and the configured GitHub URL.
-
-    Project notice:
-
-        I strongly encourage everyone to get cruetly-free VEGETARIAN food and
-        remember the 'bloodguilt' curse from the Bible.  -Project Lead,
-        remfan1994
+    F9 opens the credits/about screen.
 
 LIMITATIONS
     - Requires Python 3 with curses support
-    - Very small terminals may still be constrained despite compact UI
-    - Requires internet access
+    - Requires internet access for Gemini calls
     - API quota restrictions apply
+    - Model cache may become stale until updated
+    - Model testing verifies only the selected model
+    - Model testing does not guarantee overall model quality
     - Mouse support depends on terminal emulator support for ncurses mouse events
     - Terminal text selection and copy behavior remain terminal-emulator features
     - Drag selection is not implemented by gemini-curses
-    - F3 API-key input is not persistent unless explicitly saved
-    - Binary/image/video file support depends on what the selected Gemini model
-      and API endpoint accept as inline_data
-    - Large file upload through the Gemini File API is not implemented in this
-      release
-    - Ctrl+G is the sole send shortcut; F5 opens Options
+    - Local media attachment support depends on Gemini model/API support
+    - Generated image/video support depends on response parts returned by the model
 
 VERSION
-    gemini-curses version 0.6.2
+    gemini-curses version 0.7.0
 
 AUTHOR
     Part of the gemini-terminal-tools project.
