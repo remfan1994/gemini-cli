@@ -6,7 +6,7 @@
 # Bash-based terminal Gemini AI interface.
 #
 # VERSION
-#   2.4
+#   2.5
 #
 # DESIGN ROLE
 #   This Bash edition is the lightweight, line-oriented
@@ -19,14 +19,23 @@
 #   - Timestamped logs
 #   - Rolling conversation context
 #   - Resume-time memory rebuild from session logs
+#   - Memory snapshots saved into session logs
+#   - Temporary Project Lead startup notice for new blank sessions
 #   - Config file support
 #   - Built-in help/version system
 #   - Automatic attachment extraction
 #   - Configurable storage directories
 #   - Model listing
-#   - Model autoscan with answer validation
+#   - User-operated model testing
 #   - Numbered model selection
 #   - API-key setup helper
+#
+# PROJECT LEAD STARTUP NOTICE
+#   New blank sessions display a temporary transcript-style
+#   message from remfan1994. It is removed from the visible
+#   terminal when the first user message is sent. It is not
+#   written to logs, not stored in memory, and not sent to
+#   Gemini.
 #
 # MEMORY / CONTEXT TERMINOLOGY
 #   CONTEXT_TURNS is the preferred config key.
@@ -46,11 +55,8 @@
 #     - list models:
 #         gemini-cli --models
 #
-#     - autoscan for a working model:
-#         gemini-cli --autoscan-model
-#
-#     - autoscan and save:
-#         gemini-cli --autoscan-model --save
+#     - test one selected model:
+#         gemini-cli --test-model MODEL_ID
 #
 #     - choose from a numbered list:
 #         gemini-cli --select-model
@@ -59,16 +65,11 @@
 #
 #     curl "https://generativelanguage.googleapis.com/v1beta/models?key=YOUR_API_KEY"
 #
-# AUTOSCAN CHALLENGE
-#   Autoscan no longer accepts any non-empty output.
+# MODEL TESTING
+#   Autoscan has been removed from the Bash version.
 #
-#   Default challenge:
-#     Prompt:   What is the capital of Texas?
-#     Expected: austin
-#
-#   These can be changed in config:
-#     AUTOSCAN_PROMPT=What is the capital of Texas?
-#     AUTOSCAN_EXPECTED=austin
+#   The tool now tests only a user-selected model. This avoids
+#   probing every model in Google's list.
 #
 # API KEY MANAGEMENT
 #   Preferred:
@@ -93,7 +94,7 @@
 set -o pipefail
 
 PROGRAM="gemini-cli"
-VERSION="2.4"
+VERSION="2.5"
 
 CONFIG_DIR="$HOME/.config/gemini-cli"
 CONFIG_FILE="$CONFIG_DIR/config"
@@ -106,8 +107,10 @@ FALLBACK_MODEL="gemini-2.5-flash"
 MODEL=""
 CONTEXT_TURNS=12
 CONTEXT_TURNS_EXPLICIT=0
-AUTOSCAN_PROMPT="What is the capital of Texas?"
-AUTOSCAN_EXPECTED="austin"
+MODEL_TEST_PROMPT="Please reply with a short sentence confirming this model is available for text generation."
+STARTUP_NOTICE=1
+PROJECT_LEAD_NAME="remfan1994"
+PROJECT_LEAD_NOTICE="I strongly encourage everyone to get cruetly-free VEGETARIAN food and remember the 'bloodguilt' curse from the Bible.  -Project Lead, remfan1994"
 
 USER_NAME="$(whoami)"
 CONTEXT_BUFFER=()
@@ -198,6 +201,23 @@ positive_int_or_default() {
   esac
 }
 
+truthy() {
+  case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
+    1|yes|y|true|on)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+clear_screen() {
+  if [ -t 1 ]; then
+    printf '\033[H\033[J'
+  fi
+}
+
 
 # ==========================================================
 # CONFIG FILE SUPPORT
@@ -210,8 +230,8 @@ positive_int_or_default() {
 #   GEMINI_API_KEY
 #   SESSION_DIR
 #   ATTACHMENT_DIR
-#   AUTOSCAN_PROMPT
-#   AUTOSCAN_EXPECTED
+#   MODEL_TEST_PROMPT
+#   STARTUP_NOTICE
 #
 # Format:
 #   KEY=VALUE
@@ -272,16 +292,14 @@ if [ -f "$CONFIG_FILE" ]; then
         ATTACHMENT_DIR_CONFIGURED=1
         ;;
 
-      AUTOSCAN_PROMPT)
+      MODEL_TEST_PROMPT)
         if [ -n "$value" ]; then
-          AUTOSCAN_PROMPT="$value"
+          MODEL_TEST_PROMPT="$value"
         fi
         ;;
 
-      AUTOSCAN_EXPECTED)
-        if [ -n "$value" ]; then
-          AUTOSCAN_EXPECTED="$value"
-        fi
+      STARTUP_NOTICE)
+        STARTUP_NOTICE="$value"
         ;;
     esac
   done < "$CONFIG_FILE"
@@ -303,7 +321,7 @@ mkdir -p "$ATTACHMENT_DIR"
 # ----------------------------------------------------------
 # Used by:
 #   --set-api-key
-#   --autoscan-model --save
+#   --test-model --save
 #   --select-model
 #
 # This preserves unrelated config lines where possible and
@@ -337,6 +355,18 @@ set_config_value() {
     printf '%s=%s\n' "$key" "$value" > "$tmp"
   fi
 
+  mv "$tmp" "$CONFIG_FILE"
+  chmod 600 "$CONFIG_FILE" 2>/dev/null || true
+}
+
+remove_config_key() {
+  local key="$1"
+  local tmp
+
+  [ -f "$CONFIG_FILE" ] || return 0
+  tmp="$(mktemp "${CONFIG_FILE}.tmp.XXXXXX")"
+
+  awk -v k="$key" '$0 !~ "^" k "=" { print }' "$CONFIG_FILE" > "$tmp"
   mv "$tmp" "$CONFIG_FILE"
   chmod 600 "$CONFIG_FILE" 2>/dev/null || true
 }
@@ -394,15 +424,15 @@ USAGE
     $PROGRAM --models
         List available Gemini generateContent models.
 
-    $PROGRAM --autoscan-model
-        Test available models and print the first model that answers the
-        autoscan challenge correctly.
+    $PROGRAM --test-model <model_id>
+        Test one selected model and print the raw response.
 
-    $PROGRAM --autoscan-model --save
-        Test available models, then save the first working MODEL to config.
+    $PROGRAM --test-model <model_id> --save
+        Test one selected model and save it to config if the test succeeds.
 
     $PROGRAM --select-model
-        Show a numbered model list and choose one interactively.
+        Show a numbered model list, optionally test one, and choose one
+        interactively.
 
     $PROGRAM --select-model --save
         Choose a model and save it without asking again.
@@ -427,8 +457,8 @@ SUPPORTED CONFIG KEYS
     GEMINI_API_KEY
     SESSION_DIR
     ATTACHMENT_DIR
-    AUTOSCAN_PROMPT
-    AUTOSCAN_EXPECTED
+    MODEL_TEST_PROMPT
+    STARTUP_NOTICE
 
 MODEL DISCOVERY
     Raw Google API command:
@@ -439,16 +469,17 @@ MODEL DISCOVERY
 
         $PROGRAM --models
 
-MODEL AUTOSCAN
-    Autoscan fetches the live model list, filters to generateContent models,
-    tests candidates with a factual challenge, and uses the first model that
-    returns the expected answer substring.
+MODEL TESTING
+    Model testing sends MODEL_TEST_PROMPT to one selected model and prints
+    the response. The user decides whether the model is useful.
 
-    Default prompt:
-        $AUTOSCAN_PROMPT
+    Current MODEL_TEST_PROMPT:
+        $MODEL_TEST_PROMPT
 
-    Default expected substring:
-        $AUTOSCAN_EXPECTED
+STARTUP NOTICE
+    New blank sessions can show a temporary remfan1994 Project Lead notice.
+    It is removed from the visible terminal when the first message is sent.
+    It is not logged, sent to Gemini, or stored in memory.
 
 INPUT
     Type/paste text, then press Ctrl+D to send.
@@ -487,16 +518,15 @@ list_sessions() {
 # ==========================================================
 # RESUME MEMORY REBUILD
 # ----------------------------------------------------------
-# Bash now has parity with the ncurses edition here.
-#
 # If a session log already exists, the script parses recent
-# entries from the log and rebuilds CONTEXT_BUFFER. This means
-# follow-up questions after --resume can refer to earlier
-# messages in the same session.
+# entries from the log and rebuilds CONTEXT_BUFFER.
+#
+# The loader prefers the most recent saved context snapshot.
+# If no snapshot exists, it falls back to recent chat entries.
 #
 # CONTEXT_TURNS counts user/assistant exchanges. Since the log
-# contains separate speaker entries, we load up to
-# CONTEXT_TURNS * 2 entries.
+# and context buffer contain separate speaker entries, the
+# entry limit is CONTEXT_TURNS * 2.
 # ==========================================================
 
 load_context_from_session() {
@@ -537,9 +567,36 @@ with fh:
 if current_speaker is not None:
     entries.append((current_speaker, "\n".join(current_lines)))
 
-for speaker, text in entries[-max_entries:]:
+snapshot = None
+for speaker, text in reversed(entries):
+    if speaker.lower() != "system":
+        continue
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "CONTEXT_BEGIN":
+        continue
+    items = []
+    for line in lines[1:]:
+        if line.strip() == "CONTEXT_END":
+            break
+        if line.startswith("User: ") or line.startswith("Assistant: "):
+            items.append(line)
+    if items:
+        snapshot = items[-max_entries:]
+        break
+
+if snapshot is not None:
+    for entry in snapshot:
+        sys.stdout.buffer.write(entry.encode("utf-8", errors="replace") + b"\0")
+    sys.exit(0)
+
+fallback = []
+for speaker, text in entries:
+    if speaker.lower() == "system":
+        continue
     label = "Assistant" if speaker == "Gemini" else "User"
-    entry = f"{label}: {text}"
+    fallback.append(f"{label}: {text}")
+
+for entry in fallback[-max_entries:]:
     sys.stdout.buffer.write(entry.encode("utf-8", errors="replace") + b"\0")
 PY
 }
@@ -552,6 +609,17 @@ rebuild_context_from_session() {
   while IFS= read -r -d '' entry; do
     CONTEXT_BUFFER+=("$entry")
   done < <(load_context_from_session)
+}
+
+write_context_snapshot() {
+  local ts="$1"
+  local item
+
+  printf '[%s] system: CONTEXT_BEGIN\n' "$ts" >> "$SESSION"
+  for item in "${CONTEXT_BUFFER[@]}"; do
+    printf '%s\n' "$item" >> "$SESSION"
+  done
+  printf '[%s] system: CONTEXT_END\n' "$ts" >> "$SESSION"
 }
 
 
@@ -621,42 +689,6 @@ for item in data.get("models", []):
     output_limit = item.get("outputTokenLimit", "")
 
     print(f"{model_id}\t{display}\t{input_limit}\t{output_limit}")
-'
-}
-
-parse_model_ids() {
-  python3 -c '
-import json
-import sys
-
-raw = sys.stdin.read()
-
-try:
-    data = json.loads(raw)
-except Exception as exc:
-    print(f"ERROR: could not parse model list JSON: {exc}", file=sys.stderr)
-    sys.exit(1)
-
-if "error" in data:
-    err = data["error"]
-    code = err.get("code", "")
-    msg = err.get("message", "")
-    print(f"ERROR: Gemini API error {code}: {msg}", file=sys.stderr)
-    sys.exit(1)
-
-for item in data.get("models", []):
-    methods = item.get("supportedGenerationMethods", []) or []
-    if "generateContent" not in methods:
-        continue
-
-    name = item.get("name", "")
-    if name.startswith("models/"):
-        model_id = name.split("/", 1)[1]
-    else:
-        model_id = name
-
-    if model_id:
-        print(model_id)
 '
 }
 
@@ -775,96 +807,70 @@ call_gemini_model() {
 
 
 # ==========================================================
-# MODEL AUTOSCAN
+# USER-OPERATED MODEL TESTING
 # ----------------------------------------------------------
-# This avoids guessing future Google model names.
-#
-# Autoscan:
-#   1. Fetches the live model list.
-#   2. Filters to generateContent models.
-#   3. Tests each with AUTOSCAN_PROMPT.
-#   4. Validates that the response contains AUTOSCAN_EXPECTED.
-#   5. Prints the first model that passes.
+# Autoscan has been removed. This test function sends one
+# prompt to one model and prints the response. The user decides
+# whether the model is acceptable.
 # ==========================================================
 
-autoscan_response_valid() {
-  python3 -c '
-import sys
-expected = sys.argv[1].strip().lower() or "austin"
-text = sys.stdin.read().lower()
-sys.exit(0 if expected in text else 1)
-' "$AUTOSCAN_EXPECTED"
-}
-
-autoscan_model() {
-  local json
-  local ids_text
-  local model
-  local total
-  local i
+run_model_test() {
+  local model="$1"
   local output
   local status
-  local last_error=""
-  local snippet
 
-  json="$(fetch_models_json)" || return 1
-  ids_text="$(printf '%s' "$json" | parse_model_ids)" || return 1
+  printf 'Model: %s\n' "$model"
+  printf 'Test prompt: %s\n' "$MODEL_TEST_PROMPT"
+  printf '%s\n' ""
+  printf '%s\n' "--- model response ---"
 
-  if [ -z "$ids_text" ]; then
-    printf '%s\n' "No generateContent-compatible models were returned by the API."
-    return 1
-  fi
+  output="$(call_gemini_model "$model" "$MODEL_TEST_PROMPT" 60)"
+  status=$?
 
-  mapfile -t MODEL_IDS <<< "$ids_text"
-  total="${#MODEL_IDS[@]}"
-  i=0
+  printf '%s\n' "$output"
+  printf '%s\n' "--- end response ---"
 
-  for model in "${MODEL_IDS[@]}"; do
-    i=$((i + 1))
-    printf 'testing %s/%s: %s\n' "$i" "$total" "$model" >&2
-
-    output="$(call_gemini_model "$model" "$AUTOSCAN_PROMPT" 45)"
-    status=$?
-
-    if [ "$status" -eq 0 ] && printf '%s' "$output" | autoscan_response_valid; then
-      printf '%s\n' "$model"
-      return 0
-    fi
-
-    if [ "$status" -eq 0 ]; then
-      snippet="$(printf '%s' "$output" | tr '\n' ' ' | cut -c 1-200)"
-      last_error="response did not contain expected substring '$AUTOSCAN_EXPECTED'; response: $snippet"
-    else
-      last_error="$output"
-    fi
-  done
-
-  printf '%s\n' "No tested model answered the autoscan challenge correctly. Last error: $last_error"
-  return 1
+  return "$status"
 }
 
-autoscan_command() {
-  local selected
+test_model_command() {
+  local model="$1"
   local status
 
-  selected="$(autoscan_model)"
+  if [ -z "$model" ]; then
+    printf '%s\n' "ERROR: --test-model requires a model id." >&2
+    return 2
+  fi
+
+  run_model_test "$model"
   status=$?
 
   if [ "$status" -ne 0 ]; then
-    printf '%s\n' "$selected" >&2
-    return 1
+    return "$status"
   fi
-
-  printf '%s\n' "$selected"
 
   if [ "$SAVE" -eq 1 ]; then
-    set_config_value "MODEL" "$selected"
-    printf 'saved MODEL=%s to %s\n' "$selected" "$CONFIG_FILE" >&2
-  else
-    printf '%s\n' "" >&2
-    printf '%s\n' "To save this model:" >&2
-    printf '  %s --autoscan-model --save\n' "$PROGRAM" >&2
+    set_config_value "MODEL" "$(normalize_model_id "$model")"
+    printf 'saved MODEL=%s to %s\n' "$(normalize_model_id "$model")" "$CONFIG_FILE" >&2
   fi
+
+  return 0
+}
+
+removed_autoscan_message() {
+  cat <<EOF
+ERROR: --autoscan-model has been removed.
+
+Use one of these instead:
+
+    $PROGRAM --models
+    $PROGRAM --test-model <model_id>
+    $PROGRAM --select-model
+
+Reason:
+    The Bash version no longer probes every available model automatically.
+    Choose a model, test it, read the response, then save it if desired.
+EOF
 }
 
 
@@ -872,8 +878,8 @@ autoscan_command() {
 # NUMBERED MODEL SELECTION
 # ----------------------------------------------------------
 # This is the Bash version of model selection. It stays
-# line-oriented: print a numbered list, read a number, save
-# if requested or confirmed.
+# line-oriented: print a numbered list, read a number, offer
+# to test the selected model, then optionally save it.
 # ==========================================================
 
 select_model_command() {
@@ -888,6 +894,7 @@ select_model_command() {
   local input_limit
   local output_limit
   local answer
+  local test_status=0
 
   json="$(fetch_models_json)" || return 1
   table="$(printf '%s' "$json" | parse_models_table)" || return 1
@@ -936,11 +943,27 @@ select_model_command() {
   IFS=$'\t' read -r selected_model display input_limit output_limit <<< "$selected_line"
 
   printf 'Selected model: %s\n' "$selected_model"
+  printf 'Test selected model now? [Y/n] '
+  IFS= read -r answer
+
+  case "$answer" in
+    n|N|no|NO)
+      ;;
+    *)
+      run_model_test "$selected_model"
+      test_status=$?
+      ;;
+  esac
 
   if [ "$SAVE" -eq 1 ]; then
-    set_config_value "MODEL" "$selected_model"
-    printf 'saved MODEL=%s to %s\n' "$selected_model" "$CONFIG_FILE"
-    return 0
+    if [ "$test_status" -eq 0 ]; then
+      set_config_value "MODEL" "$selected_model"
+      printf 'saved MODEL=%s to %s\n' "$selected_model" "$CONFIG_FILE"
+      return 0
+    fi
+
+    printf '%s\n' "Test failed; model not saved."
+    return 1
   fi
 
   printf 'Save MODEL=%s to config? [y/N] ' "$selected_model"
@@ -1140,6 +1163,7 @@ ACTION="chat"
 SAVE=0
 SESSION_NAME=""
 RESUME=0
+TEST_MODEL=""
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -1159,8 +1183,18 @@ while [ "$#" -gt 0 ]; do
       ACTION="models"
       ;;
 
+    --test-model)
+      ACTION="test"
+      shift
+      if [ -z "${1:-}" ]; then
+        printf '%s\n' "ERROR: --test-model requires a model id." >&2
+        exit 2
+      fi
+      TEST_MODEL="$1"
+      ;;
+
     --autoscan-model)
-      ACTION="autoscan"
+      ACTION="removed-autoscan"
       ;;
 
     --select-model)
@@ -1231,9 +1265,14 @@ case "$ACTION" in
     exit $?
     ;;
 
-  autoscan)
-    autoscan_command
+  test)
+    test_model_command "$TEST_MODEL"
     exit $?
+    ;;
+
+  removed-autoscan)
+    removed_autoscan_message >&2
+    exit 2
     ;;
 
   select)
@@ -1248,7 +1287,7 @@ case "$ACTION" in
 esac
 
 if [ "$SAVE" -eq 1 ]; then
-  printf '%s\n' "ERROR: --save is only valid with --autoscan-model or --select-model." >&2
+  printf '%s\n' "ERROR: --save is only valid with --test-model or --select-model." >&2
   exit 2
 fi
 
@@ -1266,6 +1305,11 @@ else
 fi
 
 SESSION="$(resolve_session_path "$SESSION_NAME")"
+SESSION_WAS_EMPTY=1
+
+if [ -s "$SESSION" ]; then
+  SESSION_WAS_EMPTY=0
+fi
 
 if [ "$RESUME" -eq 1 ] && [ ! -f "$SESSION" ]; then
   printf 'ERROR: session not found: %s\n' "$SESSION_NAME" >&2
@@ -1277,24 +1321,41 @@ fi
 rebuild_context_from_session
 
 ACTIVE_MODEL="$(effective_model)"
+NOTICE_VISIBLE=0
 
-printf '%s\n' "$PROGRAM"
-printf 'session: %s\n' "$SESSION"
-printf 'model: %s\n' "$(model_label)"
-printf 'context turns: %s\n' "$CONTEXT_TURNS"
-
-if [ -f "$SESSION" ] && [ "${#CONTEXT_BUFFER[@]}" -gt 0 ]; then
-  printf 'loaded context entries: %s\n' "${#CONTEXT_BUFFER[@]}"
+if truthy "$STARTUP_NOTICE" && [ "$SESSION_WAS_EMPTY" -eq 1 ]; then
+  NOTICE_VISIBLE=1
 fi
 
-printf '%s\n' "Ctrl+D to send message, Ctrl+C to exit"
-printf '%s\n' ""
+print_chat_header() {
+  printf '%s\n' "$PROGRAM"
+  printf 'session: %s\n' "$SESSION"
+  printf 'model: %s\n' "$(model_label)"
+  printf 'context turns: %s\n' "$CONTEXT_TURNS"
 
-if [ -z "$MODEL" ]; then
-  printf '%s\n' "No MODEL configured. Using fallback model."
-  printf '%s\n' "To find and save a working model:"
-  printf '  %s --autoscan-model --save\n' "$PROGRAM"
+  if [ -f "$SESSION" ] && [ "${#CONTEXT_BUFFER[@]}" -gt 0 ]; then
+    printf 'loaded context entries: %s\n' "${#CONTEXT_BUFFER[@]}"
+  fi
+
+  printf '%s\n' "Ctrl+D to send message, Ctrl+C to exit"
   printf '%s\n' ""
+
+  if [ -z "$MODEL" ]; then
+    printf '%s\n' "No MODEL configured. Using fallback model."
+    printf '%s\n' "To choose and test a model:"
+    printf '  %s --select-model\n' "$PROGRAM"
+    printf '%s\n' ""
+  fi
+}
+
+print_project_lead_notice() {
+  printf '[%s] %s: %s\n\n' "$(timestamp)" "$PROJECT_LEAD_NAME" "$PROJECT_LEAD_NOTICE"
+}
+
+print_chat_header
+
+if [ "$NOTICE_VISIBLE" -eq 1 ]; then
+  print_project_lead_notice
 fi
 
 
@@ -1310,6 +1371,13 @@ while true; do
   buffer="$(cat)"
 
   [ -z "$buffer" ] && continue
+
+  if [ "$NOTICE_VISIBLE" -eq 1 ]; then
+    clear_screen
+    NOTICE_VISIBLE=0
+    print_chat_header
+    printf '[%s] %s: %s\n' "$TS" "$USER_NAME" "$buffer"
+  fi
 
   printf '[%s] %s: %s\n' "$TS" "$USER_NAME" "$buffer" >> "$SESSION"
 
@@ -1341,6 +1409,7 @@ while true; do
   cleaned_output="$(printf '%s' "$output" | extract_attachments)"
 
   add_to_context "Assistant: $cleaned_output"
+  write_context_snapshot "$(timestamp)"
 
   printf '%s\n\n' "$cleaned_output"
 done
