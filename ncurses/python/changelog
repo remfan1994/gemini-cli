@@ -1,4 +1,76 @@
 # Changelog
+## 0.6.0
+
+### Added
+- User-operated model tester replacing autoscan workflow
+- `--test-model <model_id>` command-line test mode
+- `t` model-test command inside the F2 model selector
+- Session browser opened with F4
+- Current-session rename support
+- New timestamped session creation from session menu
+- Options menu opened with F5
+- Config editing UI for MODEL, CONTEXT_TURNS, SESSION_DIR, ATTACHMENT_DIR, EDITOR, MODEL_TEST_PROMPT, and MAX_ATTACHMENT_BYTES
+- API-key manager opened with F3
+- Runtime-only API-key entry
+- Explicit API-key save-to-config action
+- Runtime API-key forget action
+- Config API-key removal action
+- External editor support opened with F8
+- EDITOR config key support
+- Memory menu opened with F6
+- View current memory
+- Edit current memory in external editor
+- Clear current memory
+- Rebuild memory from session log
+- Memory snapshots saved into session logs as system entries
+- Session resume now prefers latest memory snapshot when available
+- File/attachment menu opened with F7
+- Local file browser for attaching files to the next prompt
+- Text-like file attachment support
+- Binary/media inlineData attachment support for Gemini REST requests
+- Generated inlineData response attachment saving
+- Saved attachment browser and preview
+- Credits/about screen opened with F9
+- GitHub project URL in credits screen
+- Project lead vegetarian notice in credits screen
+- Reverse-video header/status styling
+- Dim/grey separator and metadata styling
+- Mouse-aware list/menu selection reuse across new menus
+- MAX_ATTACHMENT_BYTES config key
+- MODEL_TEST_PROMPT config key
+
+### Removed
+- F4 autoscan behavior
+- `--autoscan-model` command-line mode
+- Autoscan challenge settings as active behavior
+- Automatic probing of every available model
+
+### Changed
+- F4 is now the session browser instead of autoscan
+- F5 now opens the options menu; Ctrl+G remains the send command
+- Model selection workflow now emphasizes user testing and informed activation
+- API keys pasted in the interface are runtime-only unless explicitly saved
+- Session logs now store explicit context snapshots
+- Prompt sending now supports local attachments
+- Gemini response parsing now handles text, inlineData, and fileData-style response parts
+- UI styling now uses reverse video and dim attributes more consistently
+
+### Documentation
+- Updated man page synopsis with `--test-model`
+- Removed autoscan documentation
+- Added MODEL TESTING section
+- Added API KEY STORAGE section
+- Added EXTERNAL EDITOR section
+- Expanded ATTACHMENT SYSTEM section
+- Expanded MEMORY MODEL section
+- Added credits/about behavior
+- Updated controls section for F1-F9 workflow
+- Updated limitations for media attachment dependency on model/API support
+
+### Notes
+- Autoscan was removed because probing all models was deemed a questionable workflow.
+- The model tester sends one request to one user-selected model and shows the raw response.
+- Media attachment support uses Gemini REST inlineData-style request parts and depends on model capability.
 ## 0.5.0
 
 ### Added
