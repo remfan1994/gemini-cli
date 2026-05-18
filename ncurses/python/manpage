@@ -23,7 +23,9 @@ DESCRIPTION
         - wrapped input display
         - input placeholder text
         - monochrome display mode
-        - compact low-resolution-safe footer
+        - compact low-resolution-safe command strip
+        - clickable command strip labels
+        - actionable F1 command menu
         - proper cursor movement
         - mousewheel scrolling
         - mouse-assisted input cursor placement
@@ -96,8 +98,16 @@ SESSION MANAGEMENT
         highlighted sessions, or rename the current session.
 
 DISPLAY AND LOW-RESOLUTION BEHAVIOR
-    The main chat view uses a compact footer so low-resolution terminals do
-    not cut off the full command list. Press F1 for the full command menu.
+    The main chat view uses a compact command strip between the transcript
+    and the input field. The strip is designed to avoid half-cut labels on
+    low-resolution terminals.
+
+    Visible command-strip labels are clickable. Labels that do not fit are
+    not drawn; press F1 for the complete command menu.
+
+    F1 opens a full-screen actionable command menu. From the F1 menu, users
+    may launch features by pressing their function key, by highlighting a row
+    and pressing Enter, or by clicking a row.
 
     Long help, credits, and error messages are shown as full-screen scrollable
     pages. These pages support PgUp, PgDn, mousewheel scrolling, q, and Esc.
@@ -153,13 +163,18 @@ MODEL DISCOVERY AND TESTING
 
 CONTROLS
     F1
-        Show the full-screen help / command menu. The compact footer is intentionally short for low-resolution terminals.
+        Show the full-screen actionable help / command menu.
+
+        Inside the F1 menu:
+            - function keys launch their features
+            - Enter launches the highlighted row
+            - mouse click launches the clicked row
+            - q or Esc returns to the chat
 
     Enter
         Insert newline in the input box.
 
     Ctrl+G
-    F5
         Send the current message.
 
     F2
@@ -173,8 +188,7 @@ CONTROLS
         Open session browser.
 
     F5
-        Open options menu when not used as send. Note: Ctrl+G is the preferred
-        send key because F5 is overloaded by some terminals.
+        Open options menu.
 
     F6
         Open memory menu.
@@ -225,6 +239,17 @@ MOUSE SUPPORT
 
         Left click in input area
             Place the input cursor near the clicked position.
+
+        Left click visible command-strip label
+            Launch that command.
+
+    F1 command menu:
+
+        Mouse wheel up/down
+            Move through the command list.
+
+        Left click row
+            Launch the clicked command.
 
     Model selector:
 
@@ -328,7 +353,7 @@ MEMORY MODEL
     The session log remains the permanent archive. The context buffer is the
     recent window sent back to Gemini.
 
-    gemini-curses now writes context snapshots into session logs as system
+    gemini-curses writes context snapshots into session logs as system
     records. These records allow memory state to be recovered more explicitly
     than by reconstructing only from transcript text.
 
@@ -418,10 +443,10 @@ LIMITATIONS
       and API endpoint accept as inline_data
     - Large file upload through the Gemini File API is not implemented in this
       release
-    - F5 may conflict with terminal behavior; Ctrl+G is preferred for sending
+    - Ctrl+G is the sole send shortcut; F5 opens Options
 
 VERSION
-    gemini-curses version 0.6.1
+    gemini-curses version 0.6.2
 
 AUTHOR
     Part of the gemini-terminal-tools project.
