@@ -36,6 +36,9 @@ DESCRIPTION
         - generated inlineData attachment saving
         - cached model list support
         - explicit model-list update workflow
+        - metadata-based model filtering
+        - token-limit model filtering
+        - preview/experimental model hiding
         - in-app model selection
         - user-operated model testing
         - in-app API key management
@@ -222,7 +225,8 @@ MODEL DISCOVERY
         gemini-curses --models
 
     The --models command uses the local model cache if available. If no cache
-    exists, it fetches the list from Google and creates the cache.
+    exists, it fetches the list from Google and creates the cache. The output
+    includes model IDs, display names, token limits, and supported methods.
 
     To force-refresh the cache:
 
@@ -233,9 +237,9 @@ MODEL DISCOVERY
         curl "https://generativelanguage.googleapis.com/v1beta/models?key=YOUR_API_KEY"
 
 MODEL CACHE
-    The model cache is stored in the config directory as:
+    The default model cache path is:
 
-        ~/.config/gemini-cli/models-cache.json
+        ~/.cache/gemini-cli/models.json
 
     F2 does not automatically hit the network.
 
@@ -249,6 +253,35 @@ MODEL CACHE
             cache.
 
     This avoids accidental network/API calls when the user merely presses F2.
+
+MODEL METADATA FILTERS
+    The model selector uses metadata returned by the Gemini model-list endpoint
+    instead of guessing which future model names will be useful.
+
+    Press f in the model selector to open the model filter screen.
+
+    Available filters include:
+
+        Require input/output token limits > 0
+            Hides models that do not report usable token limits.
+
+        Hide preview/experimental/beta models
+            Hides models whose ID, display name, API name, or description
+            appears to mark them as preview, experimental, exp, or beta.
+
+        Minimum input token limit
+            Hides models whose inputTokenLimit is below the configured value.
+
+        Minimum output token limit
+            Hides models whose outputTokenLimit is below the configured value.
+
+        Sort order
+            Sort by API model name, display name, input-token limit, or
+            output-token limit.
+
+    These filters do not send generation requests. They operate only on cached
+    or freshly loaded listModels metadata. The user-operated model tester
+    remains available with t for testing one highlighted model.
 
 MODEL TESTING
     Autoscan has been removed.
@@ -341,6 +374,31 @@ CONFIGURATION
         MODEL_TEST_PROMPT
             Prompt sent by the model tester.
 
+        MODEL_CACHE_FILE
+            Path to the local cached model-list JSON file.
+
+        MODEL_FILTER_GENERATE_CONTENT
+            If enabled, the model selector shows only models whose
+            supportedGenerationMethods include generateContent.
+
+        MODEL_FILTER_REQUIRE_TOKENS
+            If enabled, the model selector hides models without positive
+            input/output token limits.
+
+        MODEL_FILTER_HIDE_PREVIEW
+            If enabled, the model selector hides preview, experimental, exp,
+            and beta-looking models.
+
+        MODEL_MIN_INPUT_TOKENS
+            Minimum inputTokenLimit required for display in the model selector.
+
+        MODEL_MIN_OUTPUT_TOKENS
+            Minimum outputTokenLimit required for display in the model selector.
+
+        MODEL_SORT_ORDER
+            Model selector sort order. Supported values are api, name,
+            display, input-desc, and output-desc.
+
         INPUT_PLACEHOLDER
             Placeholder displayed in the empty input field.
 
@@ -374,8 +432,9 @@ FILES
     ~/.config/gemini-cli/config
         Configuration file.
 
-    ~/.config/gemini-cli/models-cache.json
-        Cached Gemini model list.
+    ~/.cache/gemini-cli/models.json
+        Default cached Gemini model list. This path may be changed with
+        MODEL_CACHE_FILE.
 
     SESSION_DIR/*.log
         Session log files.
@@ -428,6 +487,8 @@ LIMITATIONS
     - Requires internet access for Gemini calls
     - API quota restrictions apply
     - Model cache may become stale until updated
+    - Model metadata filters depend on the metadata returned by Google
+    - Preview/experimental hiding uses name and description heuristics
     - Model testing verifies only the selected model
     - Model testing does not guarantee overall model quality
     - Mouse support depends on terminal emulator support for ncurses mouse events
@@ -437,7 +498,7 @@ LIMITATIONS
     - Generated image/video support depends on response parts returned by the model
 
 VERSION
-    gemini-curses version 0.7.0
+    gemini-curses version 0.7.1
 
 AUTHOR
     Part of the gemini-terminal-tools project.
