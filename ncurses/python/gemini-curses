@@ -4,9 +4,10 @@ gemini-curses
 
 Ncurses-based Gemini terminal interface for the gemini-terminal-tools project.
 
-This release emphasizes UI stabilization: cached model lists, explicit model-list
-updates, global function-key navigation from feature screens, and a more
-user-friendly form-style options screen.
+This release removes automatic model scanning and replaces it with an explicit,
+user-operated model tester. It also adds session browsing/renaming, config
+options, memory viewing/editing, external editor support, credits, file
+attachment support, cached model lists, and metadata-based model filtering.
 """
 
 from __future__ import annotations
@@ -32,7 +33,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-VERSION = "0.7.0"
+VERSION = "0.7.1"
 PROGRAM = "gemini-curses"
 FALLBACK_MODEL = "gemini-2.5-flash"
 DEFAULT_MODEL_TEST_PROMPT = "Please reply with one short sentence confirming this model is available for text generation."
@@ -41,6 +42,10 @@ PROJECT_NOTICE = "I strongly encourage everyone to get cruetly-free VEGETARIAN f
 INPUT_PLACEHOLDER_DEFAULT = "Type your chat message here..."
 MOUSE_SCROLL_LINES = 3
 MAX_INLINE_ATTACHMENT_BYTES = 20 * 1024 * 1024
+DEFAULT_MODEL_CACHE_FILE = Path.home() / ".cache" / "gemini-cli" / "models.json"
+DEFAULT_MODEL_MIN_INPUT_TOKENS = 1
+DEFAULT_MODEL_MIN_OUTPUT_TOKENS = 1
+DEFAULT_MODEL_SORT_ORDER = "api"
 
 
 # ---------------------------------------------------------------------------
@@ -74,6 +79,13 @@ class Config:
     input_placeholder: str = INPUT_PLACEHOLDER_DEFAULT
     startup_notice: bool = True
     config_file: Path = field(default_factory=lambda: Path.home() / ".config" / "gemini-cli" / "config")
+    model_cache_file: Path = field(default_factory=lambda: DEFAULT_MODEL_CACHE_FILE)
+    model_filter_generate_content: bool = True
+    model_filter_require_tokens: bool = True
+    model_filter_hide_preview: bool = False
+    model_min_input_tokens: int = DEFAULT_MODEL_MIN_INPUT_TOKENS
+    model_min_output_tokens: int = DEFAULT_MODEL_MIN_OUTPUT_TOKENS
+    model_sort_order: str = DEFAULT_MODEL_SORT_ORDER
 
     @property
     def effective_model(self) -> str:
@@ -88,10 +100,6 @@ class Config:
     @property
     def effective_editor(self) -> str:
         return self.editor or os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"
-
-    @property
-    def model_cache_file(self) -> Path:
-        return self.config_file.parent / "models-cache.json"
 
 
 def expand_path(value: str) -> Path:
@@ -111,6 +119,14 @@ def parse_positive_int(value: str, fallback: int) -> int:
     except ValueError:
         return fallback
     return max(1, parsed)
+
+
+def parse_nonnegative_int(value: str, fallback: int) -> int:
+    try:
+        parsed = int(value)
+    except ValueError:
+        return fallback
+    return max(0, parsed)
 
 
 def parse_bool(value: str, default: bool = False) -> bool:
@@ -167,6 +183,21 @@ def load_config() -> Config:
                         cfg.input_placeholder = value
                 elif key == "STARTUP_NOTICE":
                     cfg.startup_notice = parse_bool(value, cfg.startup_notice)
+                elif key == "MODEL_CACHE_FILE":
+                    cfg.model_cache_file = expand_path(value)
+                elif key == "MODEL_FILTER_GENERATE_CONTENT":
+                    cfg.model_filter_generate_content = parse_bool(value, cfg.model_filter_generate_content)
+                elif key == "MODEL_FILTER_REQUIRE_TOKENS":
+                    cfg.model_filter_require_tokens = parse_bool(value, cfg.model_filter_require_tokens)
+                elif key == "MODEL_FILTER_HIDE_PREVIEW":
+                    cfg.model_filter_hide_preview = parse_bool(value, cfg.model_filter_hide_preview)
+                elif key == "MODEL_MIN_INPUT_TOKENS":
+                    cfg.model_min_input_tokens = parse_nonnegative_int(value, cfg.model_min_input_tokens)
+                elif key == "MODEL_MIN_OUTPUT_TOKENS":
+                    cfg.model_min_output_tokens = parse_nonnegative_int(value, cfg.model_min_output_tokens)
+                elif key == "MODEL_SORT_ORDER":
+                    if value in {"api", "name", "display", "input-desc", "output-desc"}:
+                        cfg.model_sort_order = value
 
     if env_api_key:
         cfg.api_key = env_api_key
@@ -213,8 +244,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("session_name", nargs="?", help="named session to create or open")
     parser.add_argument("--resume", metavar="NAME", help="resume an existing named session")
     parser.add_argument("--list", action="store_true", help="list saved sessions")
-    parser.add_argument("--models", action="store_true", help="list cached Gemini generateContent models; fetch/cache if no cache exists")
-    parser.add_argument("--update-models", action="store_true", help="fetch Gemini models from Google and update the local cache")
+    parser.add_argument("--models", action="store_true", help="list cached Gemini generateContent models, fetching if cache is missing")
+    parser.add_argument("--update-models", action="store_true", help="refresh the cached Gemini model list from Google and exit")
     parser.add_argument("--test-model", metavar="MODEL", help="send the model-test prompt to MODEL and print the response")
     parser.add_argument("--version", action="store_true", help="show version information")
     return parser.parse_args()
@@ -250,6 +281,17 @@ class ModelInfo:
     input_token_limit: Optional[int] = None
     output_token_limit: Optional[int] = None
     methods: List[str] = field(default_factory=list)
+
+
+@dataclass
+class ModelFilter:
+    # Metadata-based filters for the model selector. These use the capabilities
+    # returned by the model-list endpoint instead of probing every model.
+    require_token_limits: bool = True
+    hide_preview_or_experimental: bool = False
+    min_input_tokens: int = 1
+    min_output_tokens: int = 1
+    sort_mode: str = "api"
 
 
 @dataclass
@@ -484,10 +526,50 @@ def model_from_dict(raw: dict) -> ModelInfo:
     )
 
 
+
+
+def model_supports_generate_content(model: ModelInfo) -> bool:
+    return "generateContent" in (model.methods or [])
+
+
+def model_token_value(value: Optional[int]) -> int:
+    try:
+        if value is None:
+            return 0
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def model_has_token_limits(model: ModelInfo) -> bool:
+    return model_token_value(model.input_token_limit) > 0 and model_token_value(model.output_token_limit) > 0
+
+
+def model_is_preview_or_experimental(model: ModelInfo) -> bool:
+    text = " ".join([
+        model.model_id or "",
+        model.display_name or "",
+        model.api_name or "",
+        model.description or "",
+    ]).lower()
+    markers = ["preview", "experimental", " exp", "-exp", "_exp", " beta", "-beta", "_beta"]
+    return any(marker in text for marker in markers)
+
+
+def sort_models_for_browser(models: List[ModelInfo], sort_mode: str) -> List[ModelInfo]:
+    if sort_mode == "input":
+        return sorted(models, key=lambda m: (model_token_value(m.input_token_limit), m.model_id.lower()), reverse=True)
+    if sort_mode == "output":
+        return sorted(models, key=lambda m: (model_token_value(m.output_token_limit), m.model_id.lower()), reverse=True)
+    if sort_mode == "display":
+        return sorted(models, key=lambda m: ((m.display_name or m.model_id).lower(), m.model_id.lower()))
+    return sorted(models, key=lambda m: m.model_id.lower())
+
+
 def save_model_cache(cfg: Config, models: List[ModelInfo]) -> None:
     cfg.model_cache_file.parent.mkdir(parents=True, exist_ok=True)
     payload = {
-        "updated": datetime.now().isoformat(timespec="seconds"),
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
         "models": [model_to_dict(model) for model in models],
     }
     cfg.model_cache_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -495,50 +577,202 @@ def save_model_cache(cfg: Config, models: List[ModelInfo]) -> None:
 
 def load_model_cache(cfg: Config) -> Tuple[List[ModelInfo], Optional[str], str]:
     if not cfg.model_cache_file.exists():
-        return [], "No cached model list found. Use Update model list from Google.", ""
+        return [], "No cached model list found. Use 'Load/update model list from Google' first.", ""
     try:
-        payload = json.loads(cfg.model_cache_file.read_text(encoding="utf-8"))
-        models = [model_from_dict(item) for item in payload.get("models", [])]
+        raw = json.loads(cfg.model_cache_file.read_text(encoding="utf-8", errors="replace"))
+        models = [model_from_dict(item) for item in raw.get("models", [])]
         models = [model for model in models if model.model_id]
-        updated = str(payload.get("updated", "unknown"))
+        updated_at = str(raw.get("updated_at", "unknown time"))
     except Exception as exc:
-        return [], f"Could not read cached model list: {exc}", ""
+        return [], f"Could not read model cache: {exc}", ""
     if not models:
-        return [], "Cached model list is empty. Use Update model list from Google.", updated
-    return models, None, updated
+        return [], "Cached model list is empty. Use 'Load/update model list from Google'.", updated_at
+    return models, None, updated_at
 
 
-def update_model_cache(cfg: Config) -> Tuple[List[ModelInfo], Optional[str], str]:
+def model_has_preview_marker(model: ModelInfo) -> bool:
+    haystack = " ".join([model.model_id, model.display_name, model.description]).lower()
+    markers = ("preview", "experimental", " exp", "-exp", "_exp", " beta", "-beta", "_beta")
+    return any(marker in haystack for marker in markers)
+
+
+def apply_model_filters(models: List[ModelInfo], model_filter: ModelFilter) -> List[ModelInfo]:
+    filtered: List[ModelInfo] = []
+
+    for model in models:
+        input_limit = model.input_token_limit or 0
+        output_limit = model.output_token_limit or 0
+
+        if model_filter.require_token_limits and (input_limit <= 0 or output_limit <= 0):
+            continue
+        if input_limit < model_filter.min_input_tokens:
+            continue
+        if output_limit < model_filter.min_output_tokens:
+            continue
+        if model_filter.hide_preview_or_experimental and model_has_preview_marker(model):
+            continue
+
+        filtered.append(model)
+
+    if model_filter.sort_mode == "model":
+        filtered.sort(key=lambda item: item.model_id)
+    elif model_filter.sort_mode == "input-desc":
+        filtered.sort(key=lambda item: (item.input_token_limit or 0, item.model_id), reverse=True)
+    elif model_filter.sort_mode == "output-desc":
+        filtered.sort(key=lambda item: (item.output_token_limit or 0, item.model_id), reverse=True)
+
+    return filtered
+
+
+def describe_model_filter(model_filter: ModelFilter) -> str:
+    parts = []
+    if model_filter.require_token_limits:
+        parts.append("token limits required")
+    if model_filter.hide_preview_or_experimental:
+        parts.append("preview/experimental hidden")
+    if model_filter.min_input_tokens > 1:
+        parts.append(f"min input {model_filter.min_input_tokens}")
+    if model_filter.min_output_tokens > 1:
+        parts.append(f"min output {model_filter.min_output_tokens}")
+    if model_filter.sort_mode != "api":
+        parts.append(f"sort {model_filter.sort_mode}")
+    return ", ".join(parts) if parts else "no extra filters"
+
+
+# ---------------------------------------------------------------------------
+# Model metadata filtering
+# ---------------------------------------------------------------------------
+# These filters use listModels metadata (supportedGenerationMethods, token
+# limits, model names/descriptions) instead of probing every model. This is
+# the preferred model-selection path. The separate model tester remains
+# available for one user-selected model.
+# ---------------------------------------------------------------------------
+
+
+def model_token_value(value: Optional[int]) -> int:
+    try:
+        if value is None:
+            return 0
+        return int(value)
+    except Exception:
+        return 0
+
+
+def model_supports_generate_content(model: ModelInfo) -> bool:
+    return "generateContent" in (model.methods or [])
+
+
+def model_has_required_token_limits(model: ModelInfo) -> bool:
+    return model_token_value(model.input_token_limit) > 0 and model_token_value(model.output_token_limit) > 0
+
+
+def model_looks_preview(model: ModelInfo) -> bool:
+    text = " ".join([model.model_id or "", model.display_name or "", model.api_name or "", model.description or ""]).lower()
+    return any(token in text for token in ["preview", "experimental", " exp", "-exp", "_exp", " beta", "-beta", "_beta"])
+
+
+def sort_model_list(cfg: Config, models: List[ModelInfo]) -> List[ModelInfo]:
+    if cfg.model_sort_order == "name":
+        return sorted(models, key=lambda model: model.model_id.lower())
+    if cfg.model_sort_order == "display":
+        return sorted(models, key=lambda model: (model.display_name or model.model_id).lower())
+    if cfg.model_sort_order == "input-desc":
+        return sorted(models, key=lambda model: (model_token_value(model.input_token_limit), model.model_id.lower()), reverse=True)
+    if cfg.model_sort_order == "output-desc":
+        return sorted(models, key=lambda model: (model_token_value(model.output_token_limit), model.model_id.lower()), reverse=True)
+    return list(models)
+
+
+def filter_model_list(cfg: Config, models: List[ModelInfo]) -> List[ModelInfo]:
+    filtered = list(models)
+    if cfg.model_filter_generate_content:
+        filtered = [model for model in filtered if model_supports_generate_content(model)]
+    if cfg.model_filter_require_tokens:
+        filtered = [model for model in filtered if model_has_required_token_limits(model)]
+    if cfg.model_filter_hide_preview:
+        filtered = [model for model in filtered if not model_looks_preview(model)]
+    if cfg.model_min_input_tokens > 0:
+        filtered = [model for model in filtered if model_token_value(model.input_token_limit) >= cfg.model_min_input_tokens]
+    if cfg.model_min_output_tokens > 0:
+        filtered = [model for model in filtered if model_token_value(model.output_token_limit) >= cfg.model_min_output_tokens]
+    return sort_model_list(cfg, filtered)
+
+
+def model_filter_summary(cfg: Config, before_count: int, after_count: int) -> str:
+    flags = []
+    if cfg.model_filter_generate_content:
+        flags.append("generateContent")
+    if cfg.model_filter_require_tokens:
+        flags.append("token limits")
+    if cfg.model_filter_hide_preview:
+        flags.append("hide preview/experimental")
+    flags.append(f"min input:{cfg.model_min_input_tokens}")
+    flags.append(f"min output:{cfg.model_min_output_tokens}")
+    flags.append(f"sort:{cfg.model_sort_order}")
+    return f"Showing {after_count}/{before_count} models | " + ", ".join(flags)
+
+
+def model_badges(model: ModelInfo) -> str:
+    badges = []
+    if model_supports_generate_content(model):
+        badges.append("gen")
+    if model_has_required_token_limits(model):
+        badges.append("tokens")
+    if model_looks_preview(model):
+        badges.append("preview")
+    return "/".join(badges) or "metadata"
+
+
+def print_model_rows(models: List[ModelInfo]) -> None:
+    for model in models:
+        print(
+            f"{model.model_id}\t"
+            f"{model.display_name or model.model_id}\t"
+            f"input:{model.input_token_limit or '?'}\t"
+            f"output:{model.output_token_limit or '?'}\t"
+            f"{model_badges(model)}"
+        )
+
+
+def update_models_command(cfg: Config) -> int:
     models, error = fetch_models(cfg)
     if error:
-        return [], error, ""
+        print(f"ERROR: {error}", file=sys.stderr)
+        return 1
     save_model_cache(cfg, models)
-    return models, None, datetime.now().isoformat(timespec="seconds")
-
-
-def print_models(cfg: Config) -> int:
-    models, error, updated = load_model_cache(cfg)
-    if error:
-        models, error, updated = update_model_cache(cfg)
-    if error:
-        print(f"ERROR: {error}", file=sys.stderr)
-        return 1
-    if updated:
-        print(f"# model cache updated: {updated}")
-    for model in models:
-        print(f"{model.model_id}\t{model.display_name or model.model_id}")
+    visible = filter_model_list(cfg, models)
+    print(f"# updated cache: {cfg.model_cache_file}", file=sys.stderr)
+    print(f"# {model_filter_summary(cfg, len(models), len(visible))}", file=sys.stderr)
+    print_model_rows(visible)
     return 0
 
 
-def print_update_models(cfg: Config) -> int:
-    models, error, updated = update_model_cache(cfg)
-    if error:
-        print(f"ERROR: {error}", file=sys.stderr)
-        return 1
-    print(f"# model cache updated: {updated}")
-    for model in models:
-        print(f"{model.model_id}\t{model.display_name or model.model_id}")
+def print_models(cfg: Config, update: bool = False) -> int:
+    if update:
+        models, error = fetch_models(cfg)
+        if error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 1
+        save_model_cache(cfg, models)
+    else:
+        models, error, _updated_at = load_model_cache(cfg)
+        if error:
+            models, error = fetch_models(cfg)
+            if error:
+                print(f"ERROR: {error}", file=sys.stderr)
+                return 1
+            save_model_cache(cfg, models)
+
+    visible = filter_model_list(cfg, models)
+    print(f"# {model_filter_summary(cfg, len(models), len(visible))}", file=sys.stderr)
+    for model in visible:
+        print(
+            f"{model.model_id}\t{model.display_name or model.model_id}\t"
+            f"input:{model.input_token_limit or '?'}\toutput:{model.output_token_limit or '?'}\t"
+            f"methods:{','.join(model.methods or [])}"
+        )
     return 0
+
 
 def print_model_test(cfg: Config, model_id: str) -> int:
     attachment_dir = cfg.effective_attachment_dir
@@ -736,6 +970,17 @@ class GeminiCursesApp:
         self.transcript: List[TranscriptItem] = []
         self.transcript_scroll = 0
         self.pending_attachments: List[PendingAttachment] = []
+
+        # Model-selector filters use metadata from the model list, not probe
+        # requests. They are initialized from config, then can be adjusted in
+        # the F2 model-filter menu for the current run.
+        self.model_filter = ModelFilter(
+            require_token_limits=cfg.model_filter_require_tokens,
+            hide_preview_or_experimental=cfg.model_filter_hide_preview,
+            min_input_tokens=cfg.model_min_input_tokens,
+            min_output_tokens=cfg.model_min_output_tokens,
+            sort_mode=cfg.model_sort_order if cfg.model_sort_order in {"api", "model", "input-desc", "output-desc"} else "api",
+        )
 
         self.input_lines: List[str] = [""]
         self.cursor_row = 0
@@ -1130,7 +1375,7 @@ class GeminiCursesApp:
             self.stdscr.refresh()
 
             ch = self.stdscr.getch()
-            if self.handle_global_nav_key(ch):
+            if self.handle_global_hotkey(ch):
                 return
             if ch == curses.KEY_MOUSE:
                 try:
@@ -1176,8 +1421,6 @@ class GeminiCursesApp:
             self.safe_addstr(top + box_h - 1, left, "+" + "-" * (box_w - 2) + "+", attr=self.reverse_attr())
             self.stdscr.refresh()
             ch = self.stdscr.getch()
-            if self.handle_global_nav_key(ch):
-                return default
             if ch == curses.KEY_MOUSE:
                 try:
                     _mid, x, y_mouse, _z, state = curses.getmouse()
@@ -1216,8 +1459,6 @@ class GeminiCursesApp:
             self.safe_addstr(top + 10, left, "+" + "-" * (box_w - 2) + "+", attr=self.reverse_attr())
             self.stdscr.refresh()
             ch = self.stdscr.getch()
-            if self.handle_global_nav_key(ch):
-                return None
             if ch in (10, 13, curses.KEY_ENTER):
                 return value.strip()
             if ch == 27:
@@ -1310,20 +1551,6 @@ class GeminiCursesApp:
         elif action == "quit":
             self.should_quit = True
 
-    def handle_global_nav_key(self, ch: int, current_action: str = "") -> bool:
-        """Let function keys jump between feature screens.
-
-        Modal screens call this before handling their local keys so F2/F3/F4/etc.
-        behave as global navigation instead of trapping the user until Esc.
-        """
-        action = self.action_for_function_key(ch)
-        if not action:
-            return False
-        if action == current_action:
-            return False
-        self.dispatch_command_action(action)
-        return True
-
     def open_help(self) -> None:
         # F1 is now an actionable command menu, not only a static help page.
         # Function keys work while this menu is open, Enter launches the
@@ -1358,8 +1585,6 @@ class GeminiCursesApp:
             self.stdscr.refresh()
 
             ch = self.stdscr.getch()
-            if self.handle_global_nav_key(ch, current_action="help"):
-                return
             if ch == curses.KEY_MOUSE:
                 try:
                     _mid, _x, y, _z, state = curses.getmouse()
@@ -1475,52 +1700,45 @@ class GeminiCursesApp:
                 self.status = f"model saved: {model.model_id}"
 
     def open_model_selector(self) -> None:
-        """Open a local model menu without immediately contacting Google.
+        """Open a local model-management menu without network access.
 
-        The previous selector fetched Google's model list as soon as F2 was
-        pressed. That was bad for offline use, API conservatism, and accidental
-        keypresses. This landing screen makes network access explicit.
+        Earlier releases immediately fetched Google's model list when F2 was
+        pressed. That was surprising, especially offline or on limited quota.
+        F2 now opens a local menu first. The user explicitly chooses whether
+        to use the cached list or update the list from Google.
         """
         selected = 0
-        top_index = 0
         while True:
-            cached, cache_error, cache_updated = load_model_cache(self.cfg)
-            cache_status = f"cached models: {len(cached)} | updated: {cache_updated}" if not cache_error else "cached models: none"
-            rows = [
-                ("Use cached model list", "cached"),
-                ("Update model list from Google", "update"),
-                ("Test current/fallback model", "test-current"),
-                ("Enter model ID manually", "manual"),
-                ("Save current model to config", "save-current"),
-                ("Back", "back"),
+            models_cached, cache_error, updated_at = load_model_cache(self.cfg)
+            cached_label = f"cached model list ({len(models_cached)} models, updated {updated_at})" if models_cached else "cached model list unavailable"
+            filter_label = model_filter_summary(self.cfg, len(models_cached), len(filter_model_list(self.cfg, models_cached))) if models_cached else model_filter_summary(self.cfg, 0, 0)
+            actions = [
+                ("u", "Load/update model list from Google", "update"),
+                ("c", f"Open {cached_label}", "cached"),
+                ("f", f"Model filters: {filter_label}", "filters"),
+                ("t", f"Test current model: {self.model_label()}", "test-current"),
+                ("e", "Enter model ID manually", "enter"),
+                ("s", f"Save current model: {self.model_label()}", "save-current"),
+                ("q", "Return to chat", "return"),
             ]
-            selected = min(selected, len(rows) - 1)
+
             self.stdscr.erase()
             height, width = self.stdscr.getmaxyx()
-            visible_h = max(1, height - 7)
+            visible_h = max(1, height - 6)
             self.safe_addstr(0, 0, "MODEL MENU", width, self.reverse_attr())
-            self.safe_addstr(1, 0, f"Current model: {self.model_label()}", width)
-            self.safe_addstr(2, 0, cache_status, width, self.dim_attr())
-            self.safe_addstr(3, 0, "Enter/click=choose | F-keys jump screens | Esc/q=return", width, self.dim_attr())
+            self.safe_addstr(1, 0, "No network request is made until you choose Load/update.", width, self.dim_attr())
+            self.safe_addstr(2, 0, f"Current model: {self.model_label()}", width)
+            self.safe_addstr(3, 0, "Enter/click=choose | f=filters | F-keys jump screens | Esc/q=return", width, self.dim_attr())
             self.safe_addstr(4, 0, "_" * width, width, self.dim_attr())
 
-            if selected < top_index:
-                top_index = selected
-            elif selected >= top_index + visible_h:
-                top_index = selected - visible_h + 1
+            selected = max(0, min(selected, len(actions) - 1))
+            for row, (key, label, _action) in enumerate(actions[:visible_h]):
+                attr = self.reverse_attr() if row == selected else 0
+                self.safe_addstr(5 + row, 0, f"{key}  {label}", width, attr)
 
-            for row in range(visible_h):
-                idx = top_index + row
-                if idx >= len(rows):
-                    break
-                label, action = rows[idx]
-                attr = self.reverse_attr() if idx == selected else 0
-                self.safe_addstr(5 + row, 0, label, width, attr)
-
-            self.safe_addstr(height - 1, 0, "Network call only happens when you choose Update model list from Google.", width, self.reverse_attr())
             self.stdscr.refresh()
             ch = self.stdscr.getch()
-            if self.handle_global_nav_key(ch, current_action="models"):
+            if self.handle_global_hotkey(ch, current_action="models"):
                 return
             if ch == curses.KEY_MOUSE:
                 try:
@@ -1529,19 +1747,14 @@ class GeminiCursesApp:
                     continue
                 delta = self.mouse_wheel_delta(state)
                 if delta > 0:
-                    selected = max(0, selected - MOUSE_SCROLL_LINES)
+                    selected = max(0, selected - 1)
                     continue
                 if delta < 0:
-                    selected = min(len(rows) - 1, selected + MOUSE_SCROLL_LINES)
+                    selected = min(len(actions) - 1, selected + 1)
                     continue
-                if self.mouse_button1(state) and 5 <= y < 5 + visible_h:
-                    idx = top_index + (y - 5)
-                    if 0 <= idx < len(rows):
-                        selected = idx
-                        if self.mouse_button1_double(state):
-                            ch = 10
-                    else:
-                        continue
+                if self.mouse_button1(state) and 5 <= y < 5 + len(actions):
+                    selected = y - 5
+                    ch = 10
                 else:
                     continue
             if ch in (27, ord("q"), ord("Q")):
@@ -1549,101 +1762,241 @@ class GeminiCursesApp:
                 return
             if ch == curses.KEY_UP:
                 selected = max(0, selected - 1)
-            elif ch == curses.KEY_DOWN:
-                selected = min(len(rows) - 1, selected + 1)
-            elif ch == curses.KEY_PPAGE:
-                selected = max(0, selected - visible_h)
-            elif ch == curses.KEY_NPAGE:
-                selected = min(len(rows) - 1, selected + visible_h)
-            elif ch in (10, 13, curses.KEY_ENTER):
-                action = rows[selected][1]
-                if action == "back":
-                    return
-                if action == "cached":
-                    models, error, updated = load_model_cache(self.cfg)
-                    if error:
-                        self.show_message("MODEL CACHE", [error, "", "Choose Update model list from Google to create a cache."])
-                    else:
-                        self.open_model_list_selector(models, f"CACHED MODEL LIST updated {updated}")
-                    continue
-                if action == "update":
-                    if not self.cfg.api_key:
-                        self.show_message("MODEL UPDATE", ["No API key loaded. Press F3 to paste one."])
-                        continue
-                    self.status = "updating model cache from Google..."
-                    self.draw()
-                    models, error, updated = update_model_cache(self.cfg)
-                    if error:
-                        self.show_message("MODEL UPDATE ERROR", wrap_for_width(error, 70))
-                    else:
-                        self.show_message("MODEL UPDATE", [f"Cached {len(models)} models.", f"Updated: {updated}"])
-                        self.open_model_list_selector(models, f"UPDATED MODEL LIST {updated}")
-                    continue
-                if action == "test-current":
-                    model = ModelInfo(
-                        model_id=normalize_model_id(self.cfg.effective_model),
-                        api_name=f"models/{normalize_model_id(self.cfg.effective_model)}",
-                        display_name=normalize_model_id(self.cfg.effective_model),
-                        description="Current configured or fallback model.",
-                    )
-                    self.test_model_interactive(model)
-                    continue
-                if action == "manual":
-                    model_id = self.text_input_modal("MODEL ID", "Enter Gemini model ID:", normalize_model_id(self.cfg.effective_model))
-                    if model_id:
-                        self.cfg.model = normalize_model_id(model_id)
-                        self.status = f"activated model: {self.cfg.model}"
-                        self.transcript.append(TranscriptItem("system", f"Model manually activated: {self.cfg.model}"))
-                        if self.ask_yes_no("SAVE MODEL", f"Save MODEL={self.cfg.model} to config?", default=True):
-                            set_config_value(self.cfg, "MODEL", self.cfg.model)
-                            self.status = f"model saved: {self.cfg.model}"
-                    continue
-                if action == "save-current":
-                    set_config_value(self.cfg, "MODEL", normalize_model_id(self.cfg.effective_model))
-                    self.status = f"model saved: {normalize_model_id(self.cfg.effective_model)}"
-                    return
+                continue
+            if ch == curses.KEY_DOWN:
+                selected = min(len(actions) - 1, selected + 1)
+                continue
+            if ch not in (10, 13, curses.KEY_ENTER):
+                for idx, (key, _label, _action) in enumerate(actions):
+                    if ch in (ord(key), ord(key.upper())):
+                        selected = idx
+                        ch = 10
+                        break
+            if ch not in (10, 13, curses.KEY_ENTER):
+                continue
 
-    def open_model_list_selector(self, models: List[ModelInfo], title: str) -> None:
-        if not models:
-            self.show_message("MODEL LIST", ["No models available."])
-            return
+            action = actions[selected][2]
+            if action == "return":
+                self.status = "model menu closed"
+                return
+            if action == "update":
+                if not self.cfg.api_key:
+                    self.show_message("MODEL LIST", ["No API key loaded. Press F3 to paste one."])
+                    continue
+                self.status = "loading model list from Google..."
+                self.draw()
+                models, error = fetch_models(self.cfg)
+                if error:
+                    self.show_message("MODEL LIST ERROR", [
+                        error,
+                        "",
+                        "If this is a DNS/network error, verify that the Linux container is online and can resolve generativelanguage.googleapis.com.",
+                    ])
+                    self.status = "model list failed"
+                    continue
+                save_model_cache(self.cfg, models)
+                self.status = f"model list updated: {len(models)} models"
+                self.open_model_list_selector(models, source_label="Google live list")
+                return
+            if action == "cached":
+                if cache_error:
+                    self.show_message("MODEL CACHE", [cache_error])
+                    continue
+                self.open_model_list_selector(models_cached, source_label=f"cached list updated {updated_at}")
+                return
+            if action == "filters":
+                self.open_model_filter_menu()
+                continue
+            if action == "test-current":
+                model = ModelInfo(
+                    model_id=normalize_model_id(self.cfg.effective_model),
+                    api_name="",
+                    display_name=normalize_model_id(self.cfg.effective_model),
+                    description="Current configured/fallback model.",
+                )
+                self.test_model_interactive(model)
+                continue
+            if action == "enter":
+                new_model = self.text_input_modal("ENTER MODEL ID", "Enter exact Gemini model ID:", self.cfg.model or self.cfg.effective_model)
+                if new_model:
+                    self.cfg.model = normalize_model_id(new_model)
+                    self.transcript.append(TranscriptItem("system", f"Model entered manually: {self.cfg.model}"))
+                    self.status = f"model activated: {self.cfg.model}"
+                    if self.ask_yes_no("SAVE MODEL", f"Save MODEL={self.cfg.model} to config?", default=True):
+                        set_config_value(self.cfg, "MODEL", self.cfg.model)
+                        self.status = f"model saved: {self.cfg.model}"
+                continue
+            if action == "save-current":
+                set_config_value(self.cfg, "MODEL", normalize_model_id(self.cfg.effective_model))
+                self.status = f"model saved: {normalize_model_id(self.cfg.effective_model)}"
+                continue
+
+    def open_model_filter_menu(self) -> None:
+        """Edit model-list metadata filters.
+
+        These settings use only the model-list metadata returned by Google:
+        supportedGenerationMethods, token limits, names, and descriptions. No
+        model generation requests are sent from this screen.
+        """
         selected = 0
-        current = normalize_model_id(self.cfg.effective_model)
-        for idx, model in enumerate(models):
-            if model.model_id == current:
-                selected = idx
-                break
+        sort_orders = ["api", "name", "display", "input-desc", "output-desc"]
+
+        while True:
+            rows = [
+                ("MODEL_FILTER_GENERATE_CONTENT", "bool", "Require generateContent support", self.cfg.model_filter_generate_content),
+                ("MODEL_FILTER_REQUIRE_TOKENS", "bool", "Require input/output token limits > 0", self.cfg.model_filter_require_tokens),
+                ("MODEL_FILTER_HIDE_PREVIEW", "bool", "Hide preview/experimental/beta models", self.cfg.model_filter_hide_preview),
+                ("MODEL_MIN_INPUT_TOKENS", "int", "Minimum input tokens", str(self.cfg.model_min_input_tokens)),
+                ("MODEL_MIN_OUTPUT_TOKENS", "int", "Minimum output tokens", str(self.cfg.model_min_output_tokens)),
+                ("MODEL_SORT_ORDER", "choice", "Sort order", self.cfg.model_sort_order),
+            ]
+            selected = max(0, min(selected, len(rows) - 1))
+            self.stdscr.erase()
+            height, width = self.stdscr.getmaxyx()
+            visible_h = max(1, height - 6)
+            self.safe_addstr(0, 0, "MODEL FILTERS", width, self.reverse_attr())
+            self.safe_addstr(1, 0, "Space/Enter=toggle/cycle/edit | Esc/q=back | F-keys jump", width, self.dim_attr())
+            self.safe_addstr(2, 0, "Uses listModels metadata; does not test/probe models.", width, self.dim_attr())
+            self.safe_addstr(3, 0, "_" * width, width, self.dim_attr())
+
+            for row in range(visible_h):
+                idx = row
+                if idx >= len(rows):
+                    break
+                _key, kind, label, value = rows[idx]
+                attr = self.reverse_attr() if idx == selected else 0
+                if kind == "bool":
+                    mark = "[x]" if value else "[ ]"
+                    line = f"{mark} {label}"
+                else:
+                    line = f"{label:<42} [{value}]"
+                self.safe_addstr(4 + row, 0, line, width, attr)
+            self.safe_addstr(height - 1, 0, "Model tests remain user-operated with t on one highlighted model.", width, self.dim_attr())
+            self.stdscr.refresh()
+            ch = self.stdscr.getch()
+            if self.handle_global_hotkey(ch, current_action="models"):
+                return
+            if ch == curses.KEY_MOUSE:
+                try:
+                    _mid, _x, y, _z, state = curses.getmouse()
+                except curses.error:
+                    continue
+                delta = self.mouse_wheel_delta(state)
+                if delta > 0:
+                    selected = max(0, selected - 1)
+                    continue
+                if delta < 0:
+                    selected = min(len(rows) - 1, selected + 1)
+                    continue
+                if self.mouse_button1(state) and 4 <= y < 4 + len(rows):
+                    selected = y - 4
+                    ch = 10
+                else:
+                    continue
+            if ch in (27, ord("q"), ord("Q")):
+                self.status = "model filters closed"
+                return
+            if ch == curses.KEY_UP:
+                selected = max(0, selected - 1)
+                continue
+            if ch == curses.KEY_DOWN:
+                selected = min(len(rows) - 1, selected + 1)
+                continue
+            if ch not in (10, 13, curses.KEY_ENTER, ord(" ")):
+                continue
+
+            key, kind, _label, value = rows[selected]
+            if kind == "bool":
+                new_value = not bool(value)
+                if key == "MODEL_FILTER_GENERATE_CONTENT":
+                    self.cfg.model_filter_generate_content = new_value
+                elif key == "MODEL_FILTER_REQUIRE_TOKENS":
+                    self.cfg.model_filter_require_tokens = new_value
+                elif key == "MODEL_FILTER_HIDE_PREVIEW":
+                    self.cfg.model_filter_hide_preview = new_value
+                set_config_value(self.cfg, key, "1" if new_value else "0")
+                self.status = f"saved {key}"
+            elif kind == "choice":
+                current_idx = sort_orders.index(self.cfg.model_sort_order) if self.cfg.model_sort_order in sort_orders else 0
+                self.cfg.model_sort_order = sort_orders[(current_idx + 1) % len(sort_orders)]
+                set_config_value(self.cfg, key, self.cfg.model_sort_order)
+                self.status = f"saved {key}={self.cfg.model_sort_order}"
+            else:
+                new_text = self.text_input_modal("MODEL FILTER", f"Edit {key}:", str(value))
+                if new_text is not None:
+                    if key == "MODEL_MIN_INPUT_TOKENS":
+                        self.cfg.model_min_input_tokens = parse_positive_int(new_text, self.cfg.model_min_input_tokens)
+                        set_config_value(self.cfg, key, str(self.cfg.model_min_input_tokens))
+                    elif key == "MODEL_MIN_OUTPUT_TOKENS":
+                        self.cfg.model_min_output_tokens = parse_positive_int(new_text, self.cfg.model_min_output_tokens)
+                        set_config_value(self.cfg, key, str(self.cfg.model_min_output_tokens))
+                    self.status = f"saved {key}"
+
+    def open_model_list_selector(self, models: List[ModelInfo], source_label: str = "model list") -> None:
+        if not models:
+            self.show_message("MODEL SELECTOR", ["No models available."])
+            return
+
+        raw_models = list(models)
+        selected = 0
         top_index = 0
 
         while True:
+            visible_models = filter_model_list(self.cfg, raw_models)
+            current = normalize_model_id(self.cfg.effective_model)
+
+            if not visible_models:
+                self.stdscr.erase()
+                height, width = self.stdscr.getmaxyx()
+                self.safe_addstr(0, 0, "MODEL SELECTOR", width, self.reverse_attr())
+                self.safe_addstr(1, 0, f"Source: {source_label}", width, self.dim_attr())
+                self.safe_addstr(2, 0, model_filter_summary(self.cfg, len(raw_models), 0), width, self.dim_attr())
+                self.safe_addstr(4, 0, "No models match the active metadata filters.", width)
+                self.safe_addstr(6, 0, "f=filters | Esc/q=back | F-keys jump screens", width, self.dim_attr())
+                self.stdscr.refresh()
+                ch = self.stdscr.getch()
+                if self.handle_global_hotkey(ch, current_action="models"):
+                    return
+                if ch in (27, ord("q"), ord("Q")):
+                    self.status = "model selector closed"
+                    return
+                if ch in (ord("f"), ord("F")):
+                    self.open_model_filter_menu()
+                continue
+
+            selected = max(0, min(selected, len(visible_models) - 1))
             self.stdscr.erase()
             height, width = self.stdscr.getmaxyx()
-            visible_h = max(1, height - 7)
-            self.safe_addstr(0, 0, title, width, self.reverse_attr())
-            self.safe_addstr(1, 0, f"Current model: {self.model_label()}", width)
-            self.safe_addstr(2, 0, "Enter=activate | t=test | i=info | s=save | F-keys jump screens | Esc/q=back", width, self.dim_attr())
-            self.safe_addstr(3, 0, "_" * width, width, self.dim_attr())
+            visible_h = max(1, height - 8)
+            self.safe_addstr(0, 0, "MODEL SELECTOR", width, self.reverse_attr())
+            self.safe_addstr(1, 0, f"Source: {source_label}", width, self.dim_attr())
+            self.safe_addstr(2, 0, model_filter_summary(self.cfg, len(raw_models), len(visible_models)), width, self.dim_attr())
+            self.safe_addstr(3, 0, "Enter=activate | t=test | i=info | s=save | f=filters | Esc/q=back", width, self.dim_attr())
+            self.safe_addstr(4, 0, "_" * width, width, self.dim_attr())
+
             if selected < top_index:
                 top_index = selected
             elif selected >= top_index + visible_h:
                 top_index = selected - visible_h + 1
+            top_index = max(0, min(top_index, max(0, len(visible_models) - visible_h)))
+
             for row in range(visible_h):
                 model_index = top_index + row
-                if model_index >= len(models):
+                if model_index >= len(visible_models):
                     break
-                model = models[model_index]
-                limits = ""
-                if model.input_token_limit or model.output_token_limit:
-                    limits = f" in:{model.input_token_limit or '?'} out:{model.output_token_limit or '?'}"
+                model = visible_models[model_index]
+                limits = f"in:{model.input_token_limit or '?'} out:{model.output_token_limit or '?'}"
                 current_marker = "* " if model.model_id == current else "  "
-                line = f"{current_marker}{model.model_id} - {model.display_name}{limits}"
+                badges = model_badges(model)
+                line = f"{current_marker}{model.model_id} | {limits} | {badges} | {model.display_name}"
                 attr = self.reverse_attr() if model_index == selected else 0
-                self.safe_addstr(4 + row, 0, line, width, attr)
+                self.safe_addstr(5 + row, 0, line, width, attr)
+
             self.safe_addstr(height - 2, 0, "_" * width, width, self.dim_attr())
-            self.safe_addstr(height - 1, 0, f"{selected + 1}/{len(models)}", width, self.dim_attr())
+            self.safe_addstr(height - 1, 0, f"{selected + 1}/{len(visible_models)} filtered; {len(raw_models)} cached/live total", width, self.dim_attr())
             self.stdscr.refresh()
             ch = self.stdscr.getch()
-            if self.handle_global_nav_key(ch, current_action="models"):
+            if self.handle_global_hotkey(ch, current_action="models"):
                 return
             if ch == curses.KEY_MOUSE:
                 try:
@@ -1655,47 +2008,51 @@ class GeminiCursesApp:
                     selected = max(0, selected - MOUSE_SCROLL_LINES)
                     continue
                 if delta < 0:
-                    selected = min(len(models) - 1, selected + MOUSE_SCROLL_LINES)
+                    selected = min(len(visible_models) - 1, selected + MOUSE_SCROLL_LINES)
                     continue
-                if self.mouse_button1(state) and 4 <= y < 4 + visible_h:
-                    idx = top_index + (y - 4)
-                    if 0 <= idx < len(models):
+                if self.mouse_button1(state) and 5 <= y < 5 + visible_h:
+                    idx = top_index + (y - 5)
+                    if 0 <= idx < len(visible_models):
                         selected = idx
                         if self.mouse_button1_double(state):
-                            ch = 10
+                            self.cfg.model = visible_models[selected].model_id
+                            self.status = f"activated model: {self.cfg.model}"
+                            return
                     continue
             if ch in (27, ord("q"), ord("Q")):
-                self.status = "model list closed"
+                self.status = "model selector closed"
                 return
+            if ch in (ord("f"), ord("F")):
+                self.open_model_filter_menu()
+                continue
             if ch in (ord("i"), ord("I")):
-                self.show_model_info(models[selected])
+                self.show_model_info(visible_models[selected])
                 continue
             if ch in (ord("t"), ord("T")):
-                self.test_model_interactive(models[selected])
+                self.test_model_interactive(visible_models[selected])
                 current = normalize_model_id(self.cfg.effective_model)
                 continue
             if ch in (ord("s"), ord("S")):
-                set_config_value(self.cfg, "MODEL", models[selected].model_id)
-                self.cfg.model = models[selected].model_id
-                self.status = f"model saved: {models[selected].model_id}"
+                set_config_value(self.cfg, "MODEL", visible_models[selected].model_id)
+                self.status = f"model saved: {visible_models[selected].model_id}"
                 return
             if ch in (10, 13, curses.KEY_ENTER):
-                self.cfg.model = models[selected].model_id
+                self.cfg.model = visible_models[selected].model_id
                 self.status = f"activated model: {self.cfg.model}"
                 self.transcript.append(TranscriptItem("system", f"Model activated: {self.cfg.model}"))
                 return
             if ch == curses.KEY_UP:
                 selected = max(0, selected - 1)
             elif ch == curses.KEY_DOWN:
-                selected = min(len(models) - 1, selected + 1)
+                selected = min(len(visible_models) - 1, selected + 1)
             elif ch == curses.KEY_PPAGE:
                 selected = max(0, selected - visible_h)
             elif ch == curses.KEY_NPAGE:
-                selected = min(len(models) - 1, selected + visible_h)
+                selected = min(len(visible_models) - 1, selected + visible_h)
             elif ch == curses.KEY_HOME:
                 selected = 0
             elif ch == curses.KEY_END:
-                selected = len(models) - 1
+                selected = len(visible_models) - 1
 
     def session_names(self) -> List[str]:
         self.cfg.session_dir.mkdir(parents=True, exist_ok=True)
@@ -1748,7 +2105,7 @@ class GeminiCursesApp:
             self.safe_addstr(height - 1, 0, f"{selected + 1}/{len(names)}", width, self.dim_attr())
             self.stdscr.refresh()
             ch = self.stdscr.getch()
-            if self.handle_global_nav_key(ch, current_action="sessions"):
+            if self.handle_global_hotkey(ch, current_action="sessions"):
                 return
             if ch == curses.KEY_MOUSE:
                 try:
@@ -1794,58 +2151,139 @@ class GeminiCursesApp:
     def open_options_menu(self) -> None:
         """w3m-style options form.
 
-        This is intentionally not just a config-file viewer. Boolean options
-        toggle with Space. Text/integer/path fields edit with Enter. Changes are
-        staged locally and saved together with s. Esc/q cancels.
+        The old options screen behaved like a list of config-file lines. This
+        form keeps values visible together, uses checkboxes for booleans, and
+        edits the active field inline without opening a second full-screen
+        editor for every option.
         """
-        fields = [
-            {"key": "MODEL", "label": "Model", "type": "text", "value": self.cfg.model},
-            {"key": "CONTEXT_TURNS", "label": "Context turns", "type": "int", "value": str(self.cfg.context_turns)},
-            {"key": "SESSION_DIR", "label": "Session directory", "type": "path", "value": str(self.cfg.session_dir)},
-            {"key": "ATTACHMENT_DIR", "label": "Attachment directory", "type": "path", "value": str(self.cfg.effective_attachment_dir)},
-            {"key": "EDITOR", "label": "External editor", "type": "text", "value": self.cfg.editor},
-            {"key": "MODEL_TEST_PROMPT", "label": "Model test prompt", "type": "text", "value": self.cfg.model_test_prompt},
-            {"key": "INPUT_PLACEHOLDER", "label": "Input placeholder", "type": "text", "value": self.cfg.input_placeholder},
-            {"key": "MONOCHROME", "label": "Monochrome mode", "type": "bool", "value": bool(self.cfg.monochrome)},
-            {"key": "STARTUP_NOTICE", "label": "Startup notice", "type": "bool", "value": bool(self.cfg.startup_notice)},
-        ]
         selected = 0
         top_index = 0
-        dirty = False
+        editing = False
+        edit_value = ""
+
+        def current_fields() -> List[dict]:
+            return [
+                {"key": "MODEL", "label": "Model", "kind": "text", "value": self.cfg.model},
+                {"key": "CONTEXT_TURNS", "label": "Context turns", "kind": "int", "value": str(self.cfg.context_turns)},
+                {"key": "SESSION_DIR", "label": "Session directory", "kind": "path", "value": str(self.cfg.session_dir)},
+                {"key": "ATTACHMENT_DIR", "label": "Attachment directory", "kind": "path", "value": str(self.cfg.effective_attachment_dir)},
+                {"key": "EDITOR", "label": "External editor", "kind": "text", "value": self.cfg.editor},
+                {"key": "MODEL_CACHE_FILE", "label": "Model cache file", "kind": "path", "value": str(self.cfg.model_cache_file)},
+                {"key": "MODEL_FILTER_GENERATE_CONTENT", "label": "Model browser: generateContent only", "kind": "bool", "value": self.cfg.model_filter_generate_content},
+                {"key": "MODEL_FILTER_REQUIRE_TOKENS", "label": "Model browser: require token limits", "kind": "bool", "value": self.cfg.model_filter_require_tokens},
+                {"key": "MODEL_FILTER_HIDE_PREVIEW", "label": "Model browser: hide preview/experimental", "kind": "bool", "value": self.cfg.model_filter_hide_preview},
+                {"key": "MODEL_MIN_INPUT_TOKENS", "label": "Model browser: min input tokens", "kind": "int", "value": str(self.cfg.model_min_input_tokens)},
+                {"key": "MODEL_MIN_OUTPUT_TOKENS", "label": "Model browser: min output tokens", "kind": "int", "value": str(self.cfg.model_min_output_tokens)},
+                {"key": "MODEL_SORT_ORDER", "label": "Model browser: sort order", "kind": "choice", "value": self.cfg.model_sort_order},
+                {"key": "MODEL_TEST_PROMPT", "label": "Model test prompt", "kind": "text", "value": self.cfg.model_test_prompt},
+                {"key": "INPUT_PLACEHOLDER", "label": "Input placeholder", "kind": "text", "value": self.cfg.input_placeholder},
+                {"key": "MONOCHROME", "label": "Monochrome mode", "kind": "bool", "value": self.cfg.monochrome},
+                {"key": "STARTUP_NOTICE", "label": "Startup Project Lead notice", "kind": "bool", "value": self.cfg.startup_notice},
+            ]
+
+        def apply_field(key: str, value: object) -> None:
+            if key == "MODEL":
+                self.cfg.model = normalize_model_id(str(value))
+                set_config_value(self.cfg, key, self.cfg.model)
+            elif key == "CONTEXT_TURNS":
+                self.cfg.context_turns = parse_positive_int(str(value), self.cfg.context_turns)
+                set_config_value(self.cfg, key, str(self.cfg.context_turns))
+            elif key == "SESSION_DIR":
+                self.cfg.session_dir = expand_path(str(value))
+                self.cfg.session_dir.mkdir(parents=True, exist_ok=True)
+                set_config_value(self.cfg, key, str(self.cfg.session_dir))
+            elif key == "ATTACHMENT_DIR":
+                self.cfg.attachment_dir = expand_path(str(value))
+                self.attachment_dir = self.cfg.effective_attachment_dir
+                self.attachment_dir.mkdir(parents=True, exist_ok=True)
+                set_config_value(self.cfg, key, str(self.attachment_dir))
+            elif key == "EDITOR":
+                self.cfg.editor = str(value)
+                set_config_value(self.cfg, key, self.cfg.editor)
+            elif key == "MODEL_CACHE_FILE":
+                self.cfg.model_cache_file = expand_path(str(value))
+                self.cfg.model_cache_file.parent.mkdir(parents=True, exist_ok=True)
+                set_config_value(self.cfg, key, str(self.cfg.model_cache_file))
+            elif key == "MODEL_FILTER_GENERATE_CONTENT":
+                self.cfg.model_filter_generate_content = bool(value)
+                set_config_value(self.cfg, key, "1" if self.cfg.model_filter_generate_content else "0")
+            elif key == "MODEL_FILTER_REQUIRE_TOKENS":
+                self.cfg.model_filter_require_tokens = bool(value)
+                set_config_value(self.cfg, key, "1" if self.cfg.model_filter_require_tokens else "0")
+            elif key == "MODEL_FILTER_HIDE_PREVIEW":
+                self.cfg.model_filter_hide_preview = bool(value)
+                set_config_value(self.cfg, key, "1" if self.cfg.model_filter_hide_preview else "0")
+            elif key == "MODEL_MIN_INPUT_TOKENS":
+                self.cfg.model_min_input_tokens = parse_nonnegative_int(str(value), self.cfg.model_min_input_tokens)
+                set_config_value(self.cfg, key, str(self.cfg.model_min_input_tokens))
+            elif key == "MODEL_MIN_OUTPUT_TOKENS":
+                self.cfg.model_min_output_tokens = parse_nonnegative_int(str(value), self.cfg.model_min_output_tokens)
+                set_config_value(self.cfg, key, str(self.cfg.model_min_output_tokens))
+            elif key == "MODEL_SORT_ORDER":
+                value_text = str(value)
+                if value_text in {"api", "name", "display", "input-desc", "output-desc"}:
+                    self.cfg.model_sort_order = value_text
+                    set_config_value(self.cfg, key, self.cfg.model_sort_order)
+            elif key == "MODEL_TEST_PROMPT":
+                self.cfg.model_test_prompt = str(value)
+                set_config_value(self.cfg, key, self.cfg.model_test_prompt)
+            elif key == "INPUT_PLACEHOLDER":
+                self.cfg.input_placeholder = str(value)
+                set_config_value(self.cfg, key, self.cfg.input_placeholder)
+            elif key == "MONOCHROME":
+                self.cfg.monochrome = bool(value)
+                set_config_value(self.cfg, key, "1" if self.cfg.monochrome else "0")
+            elif key == "STARTUP_NOTICE":
+                self.cfg.startup_notice = bool(value)
+                set_config_value(self.cfg, key, "1" if self.cfg.startup_notice else "0")
+            self.status = f"saved option: {key}"
 
         while True:
+            fields = current_fields()
+            selected = max(0, min(selected, len(fields) - 1))
             self.stdscr.erase()
             height, width = self.stdscr.getmaxyx()
-            visible_h = max(1, height - 7)
-            self.safe_addstr(0, 0, "OPTIONS", width, self.reverse_attr())
-            self.safe_addstr(1, 0, "Space=toggle | Enter=edit | s=save all | r=reset | F-keys jump screens | Esc/q=cancel", width, self.dim_attr())
-            self.safe_addstr(2, 0, "API keys are managed with F3. Project URL is in F9 Credits, not Options.", width, self.dim_attr())
-            self.safe_addstr(3, 0, "_" * width, width, self.dim_attr())
-
+            body_h = max(1, height - 6)
             if selected < top_index:
                 top_index = selected
-            elif selected >= top_index + visible_h:
-                top_index = selected - visible_h + 1
+            elif selected >= top_index + body_h:
+                top_index = selected - body_h + 1
 
-            for row in range(visible_h):
+            self.safe_addstr(0, 0, "OPTIONS", width, self.reverse_attr())
+            help_line = "Space=toggle | Enter=edit | s=save edit | Esc/q=return | F-keys jump screens"
+            if editing:
+                help_line = "Editing inline: Enter/s=save | Esc=cancel edit | Backspace=delete"
+            self.safe_addstr(1, 0, help_line, width, self.dim_attr())
+            self.safe_addstr(2, 0, "_" * width, width, self.dim_attr())
+
+            for row in range(body_h):
                 idx = top_index + row
                 if idx >= len(fields):
                     break
                 field = fields[idx]
-                if field["type"] == "bool":
+                attr = self.reverse_attr() if idx == selected else 0
+                if field["kind"] == "bool":
                     mark = "[x]" if field["value"] else "[ ]"
                     line = f"{mark} {field['label']}"
                 else:
-                    line = f"{field['label']:<22} [{field['value']}]"
-                attr = self.reverse_attr() if idx == selected else 0
-                self.safe_addstr(4 + row, 0, line, width, attr)
+                    val = str(field["value"])
+                    if editing and idx == selected:
+                        val = edit_value
+                    line = f"{field['label']:<24} [{val}]"
+                self.safe_addstr(3 + row, 0, line, width, attr)
 
-            state = "modified" if dirty else "unchanged"
-            self.safe_addstr(height - 1, 0, f"{selected + 1}/{len(fields)} | {state}", width, self.reverse_attr())
+            self.safe_addstr(height - 2, 0, "_" * width, width, self.dim_attr())
+            if editing:
+                self.safe_addstr(height - 1, 0, f"Editing {fields[selected]['key']}: {edit_value}", width, self.reverse_attr())
+            else:
+                self.safe_addstr(height - 1, 0, f"{selected + 1}/{len(fields)}  Config: {self.cfg.config_file}", width, self.reverse_attr())
             self.stdscr.refresh()
+
             ch = self.stdscr.getch()
-            if self.handle_global_nav_key(ch, current_action="options"):
+            if self.handle_global_hotkey(ch, current_action="options"):
                 return
+            field = fields[selected]
+
             if ch == curses.KEY_MOUSE:
                 try:
                     _mid, _x, y, _z, state = curses.getmouse()
@@ -1854,87 +2292,60 @@ class GeminiCursesApp:
                 delta = self.mouse_wheel_delta(state)
                 if delta > 0:
                     selected = max(0, selected - MOUSE_SCROLL_LINES)
-                    continue
-                if delta < 0:
+                elif delta < 0:
                     selected = min(len(fields) - 1, selected + MOUSE_SCROLL_LINES)
-                    continue
-                if self.mouse_button1(state) and 4 <= y < 4 + visible_h:
-                    idx = top_index + (y - 4)
+                elif self.mouse_button1(state) and 3 <= y < 3 + body_h:
+                    idx = top_index + (y - 3)
                     if 0 <= idx < len(fields):
                         selected = idx
                         if self.mouse_button1_double(state):
                             ch = 10
-                    else:
-                        continue
                 else:
                     continue
 
-            if ch in (27, ord("q"), ord("Q")):
-                if dirty and not self.ask_yes_no("DISCARD OPTIONS", "Discard unsaved option changes?", default=False):
+            if editing:
+                if ch in (27,):
+                    editing = False
+                    edit_value = ""
                     continue
-                self.status = "options cancelled"
+                if ch in (10, 13, curses.KEY_ENTER, ord("s"), ord("S")):
+                    apply_field(field["key"], edit_value)
+                    editing = False
+                    edit_value = ""
+                    continue
+                if ch in (curses.KEY_BACKSPACE, 127, 8):
+                    edit_value = edit_value[:-1]
+                    continue
+                if ch == curses.KEY_DC:
+                    continue
+                if 32 <= ch <= 126:
+                    edit_value += chr(ch)
+                    continue
+                continue
+
+            if ch in (27, ord("q"), ord("Q")):
                 return
-            if ch == curses.KEY_UP:
+            if ch in (curses.KEY_UP, ord("k")):
                 selected = max(0, selected - 1)
-            elif ch == curses.KEY_DOWN:
+            elif ch in (curses.KEY_DOWN, ord("j")):
                 selected = min(len(fields) - 1, selected + 1)
             elif ch == curses.KEY_PPAGE:
-                selected = max(0, selected - visible_h)
+                selected = max(0, selected - body_h)
             elif ch == curses.KEY_NPAGE:
-                selected = min(len(fields) - 1, selected + visible_h)
-            elif ch in (9,):
-                selected = (selected + 1) % len(fields)
+                selected = min(len(fields) - 1, selected + body_h)
+            elif ch == curses.KEY_HOME:
+                selected = 0
+            elif ch == curses.KEY_END:
+                selected = len(fields) - 1
             elif ch in (ord(" "),):
-                field = fields[selected]
-                if field["type"] == "bool":
-                    field["value"] = not bool(field["value"])
-                    dirty = True
+                if field["kind"] == "bool":
+                    apply_field(field["key"], not bool(field["value"]))
             elif ch in (10, 13, curses.KEY_ENTER):
-                field = fields[selected]
-                if field["type"] == "bool":
-                    field["value"] = not bool(field["value"])
-                    dirty = True
+                if field["kind"] == "bool":
+                    apply_field(field["key"], not bool(field["value"]))
                 else:
-                    new = self.text_input_modal("EDIT OPTION", f"Enter value for {field['key']}:", str(field["value"]))
-                    if new is not None:
-                        if field["type"] == "int":
-                            try:
-                                int(new)
-                            except ValueError:
-                                self.show_message("OPTIONS", [f"{field['key']} requires an integer."])
-                                continue
-                        field["value"] = new
-                        dirty = True
-            elif ch in (ord("r"), ord("R")):
-                return self.open_options_menu()
-            elif ch in (ord("s"), ord("S")):
-                for field in fields:
-                    key = str(field["key"])
-                    value = "1" if field["type"] == "bool" and field["value"] else "0" if field["type"] == "bool" else str(field["value"])
-                    set_config_value(self.cfg, key, value)
-                    if key == "MODEL":
-                        self.cfg.model = normalize_model_id(value)
-                    elif key == "CONTEXT_TURNS":
-                        self.cfg.context_turns = parse_positive_int(value, self.cfg.context_turns)
-                    elif key == "SESSION_DIR":
-                        self.cfg.session_dir = expand_path(value)
-                    elif key == "ATTACHMENT_DIR":
-                        self.cfg.attachment_dir = expand_path(value)
-                        self.attachment_dir = self.cfg.effective_attachment_dir
-                    elif key == "EDITOR":
-                        self.cfg.editor = value
-                    elif key == "MODEL_TEST_PROMPT":
-                        self.cfg.model_test_prompt = value
-                    elif key == "INPUT_PLACEHOLDER":
-                        self.cfg.input_placeholder = value
-                    elif key == "MONOCHROME":
-                        self.cfg.monochrome = bool(field["value"])
-                    elif key == "STARTUP_NOTICE":
-                        self.cfg.startup_notice = bool(field["value"])
-                self.cfg.session_dir.mkdir(parents=True, exist_ok=True)
-                self.cfg.effective_attachment_dir.mkdir(parents=True, exist_ok=True)
-                self.status = "options saved"
-                return
+                    editing = True
+                    edit_value = str(field["value"])
 
     def open_memory_menu(self) -> None:
         while True:
@@ -1947,7 +2358,7 @@ class GeminiCursesApp:
                 self.safe_addstr(3 + idx, 0, item, width)
             self.stdscr.refresh()
             ch = self.stdscr.getch()
-            if self.handle_global_nav_key(ch, current_action="memory"):
+            if self.handle_global_hotkey(ch, current_action="memory"):
                 return
             if ch in (ord("q"), ord("Q"), 27): return
             if ch in (ord("v"), ord("V")):
@@ -2009,7 +2420,7 @@ class GeminiCursesApp:
                 self.safe_addstr(3 + row, 0, label, width, attr)
             self.stdscr.refresh()
             ch = self.stdscr.getch()
-            if self.handle_global_nav_key(ch, current_action="files"):
+            if self.handle_global_hotkey(ch, current_action="files"):
                 return None
             if ch == curses.KEY_MOUSE:
                 try: _mid, _x, y, _z, state = curses.getmouse()
@@ -2054,7 +2465,7 @@ class GeminiCursesApp:
             self.stdscr.refresh()
 
             ch = self.stdscr.getch()
-            if self.handle_global_nav_key(ch, current_action="files"):
+            if self.handle_global_hotkey(ch, current_action="files"):
                 return
             if ch == curses.KEY_MOUSE:
                 try:
@@ -2248,6 +2659,22 @@ class GeminiCursesApp:
         elif action == "quit":
             self.should_quit = True
 
+    def handle_global_hotkey(self, ch: int, current_action: Optional[str] = None) -> bool:
+        """Allow F-key navigation from feature screens.
+
+        A user looking at F1/F2/F5/etc. screens should be able to jump
+        directly to another screen by pressing that function key. The only
+        exception is pressing the function key for the screen already open;
+        that is ignored to avoid recursive redraw loops.
+        """
+        action = self.action_for_function_key(ch)
+        if not action:
+            return False
+        if current_action is not None and action == current_action:
+            return False
+        self.dispatch_command_action(action)
+        return True
+
     # ------------------------------------------------------------------
     # Main event loop
     # ------------------------------------------------------------------
@@ -2322,7 +2749,7 @@ def main() -> int:
     if args.models:
         return print_models(cfg)
     if args.update_models:
-        return print_update_models(cfg)
+        return update_models_command(cfg)
     if args.test_model:
         return print_model_test(cfg, args.test_model)
     if args.resume and args.session_name:
