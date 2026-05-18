@@ -4,10 +4,9 @@ gemini-curses
 
 Ncurses-based Gemini terminal interface for the gemini-terminal-tools project.
 
-This release removes automatic model scanning and replaces it with an explicit,
-user-operated model tester. It also adds session browsing/renaming, config
-options, memory viewing/editing, external editor support, credits, and file
-attachment support.
+This release emphasizes UI stabilization: cached model lists, explicit model-list
+updates, global function-key navigation from feature screens, and a more
+user-friendly form-style options screen.
 """
 
 from __future__ import annotations
@@ -33,7 +32,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-VERSION = "0.6.2"
+VERSION = "0.7.0"
 PROGRAM = "gemini-curses"
 FALLBACK_MODEL = "gemini-2.5-flash"
 DEFAULT_MODEL_TEST_PROMPT = "Please reply with one short sentence confirming this model is available for text generation."
@@ -89,6 +88,10 @@ class Config:
     @property
     def effective_editor(self) -> str:
         return self.editor or os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"
+
+    @property
+    def model_cache_file(self) -> Path:
+        return self.config_file.parent / "models-cache.json"
 
 
 def expand_path(value: str) -> Path:
@@ -210,7 +213,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("session_name", nargs="?", help="named session to create or open")
     parser.add_argument("--resume", metavar="NAME", help="resume an existing named session")
     parser.add_argument("--list", action="store_true", help="list saved sessions")
-    parser.add_argument("--models", action="store_true", help="list available Gemini generateContent models and exit")
+    parser.add_argument("--models", action="store_true", help="list cached Gemini generateContent models; fetch/cache if no cache exists")
+    parser.add_argument("--update-models", action="store_true", help="fetch Gemini models from Google and update the local cache")
     parser.add_argument("--test-model", metavar="MODEL", help="send the model-test prompt to MODEL and print the response")
     parser.add_argument("--version", action="store_true", help="show version information")
     return parser.parse_args()
@@ -456,15 +460,85 @@ def fetch_models(cfg: Config) -> Tuple[List[ModelInfo], Optional[str]]:
     return list(unique.values()), None
 
 
-def print_models(cfg: Config) -> int:
+def model_to_dict(model: ModelInfo) -> dict:
+    return {
+        "model_id": model.model_id,
+        "api_name": model.api_name,
+        "display_name": model.display_name,
+        "description": model.description,
+        "input_token_limit": model.input_token_limit,
+        "output_token_limit": model.output_token_limit,
+        "methods": model.methods,
+    }
+
+
+def model_from_dict(raw: dict) -> ModelInfo:
+    return ModelInfo(
+        model_id=str(raw.get("model_id", "")),
+        api_name=str(raw.get("api_name", "")),
+        display_name=str(raw.get("display_name", raw.get("model_id", ""))),
+        description=str(raw.get("description", "")),
+        input_token_limit=raw.get("input_token_limit"),
+        output_token_limit=raw.get("output_token_limit"),
+        methods=list(raw.get("methods", [])),
+    )
+
+
+def save_model_cache(cfg: Config, models: List[ModelInfo]) -> None:
+    cfg.model_cache_file.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "updated": datetime.now().isoformat(timespec="seconds"),
+        "models": [model_to_dict(model) for model in models],
+    }
+    cfg.model_cache_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def load_model_cache(cfg: Config) -> Tuple[List[ModelInfo], Optional[str], str]:
+    if not cfg.model_cache_file.exists():
+        return [], "No cached model list found. Use Update model list from Google.", ""
+    try:
+        payload = json.loads(cfg.model_cache_file.read_text(encoding="utf-8"))
+        models = [model_from_dict(item) for item in payload.get("models", [])]
+        models = [model for model in models if model.model_id]
+        updated = str(payload.get("updated", "unknown"))
+    except Exception as exc:
+        return [], f"Could not read cached model list: {exc}", ""
+    if not models:
+        return [], "Cached model list is empty. Use Update model list from Google.", updated
+    return models, None, updated
+
+
+def update_model_cache(cfg: Config) -> Tuple[List[ModelInfo], Optional[str], str]:
     models, error = fetch_models(cfg)
+    if error:
+        return [], error, ""
+    save_model_cache(cfg, models)
+    return models, None, datetime.now().isoformat(timespec="seconds")
+
+
+def print_models(cfg: Config) -> int:
+    models, error, updated = load_model_cache(cfg)
+    if error:
+        models, error, updated = update_model_cache(cfg)
     if error:
         print(f"ERROR: {error}", file=sys.stderr)
         return 1
+    if updated:
+        print(f"# model cache updated: {updated}")
     for model in models:
         print(f"{model.model_id}\t{model.display_name or model.model_id}")
     return 0
 
+
+def print_update_models(cfg: Config) -> int:
+    models, error, updated = update_model_cache(cfg)
+    if error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        return 1
+    print(f"# model cache updated: {updated}")
+    for model in models:
+        print(f"{model.model_id}\t{model.display_name or model.model_id}")
+    return 0
 
 def print_model_test(cfg: Config, model_id: str) -> int:
     attachment_dir = cfg.effective_attachment_dir
@@ -1056,6 +1130,8 @@ class GeminiCursesApp:
             self.stdscr.refresh()
 
             ch = self.stdscr.getch()
+            if self.handle_global_nav_key(ch):
+                return
             if ch == curses.KEY_MOUSE:
                 try:
                     _mid, _x, _y, _z, state = curses.getmouse()
@@ -1100,6 +1176,8 @@ class GeminiCursesApp:
             self.safe_addstr(top + box_h - 1, left, "+" + "-" * (box_w - 2) + "+", attr=self.reverse_attr())
             self.stdscr.refresh()
             ch = self.stdscr.getch()
+            if self.handle_global_nav_key(ch):
+                return default
             if ch == curses.KEY_MOUSE:
                 try:
                     _mid, x, y_mouse, _z, state = curses.getmouse()
@@ -1138,6 +1216,8 @@ class GeminiCursesApp:
             self.safe_addstr(top + 10, left, "+" + "-" * (box_w - 2) + "+", attr=self.reverse_attr())
             self.stdscr.refresh()
             ch = self.stdscr.getch()
+            if self.handle_global_nav_key(ch):
+                return None
             if ch in (10, 13, curses.KEY_ENTER):
                 return value.strip()
             if ch == 27:
@@ -1230,6 +1310,20 @@ class GeminiCursesApp:
         elif action == "quit":
             self.should_quit = True
 
+    def handle_global_nav_key(self, ch: int, current_action: str = "") -> bool:
+        """Let function keys jump between feature screens.
+
+        Modal screens call this before handling their local keys so F2/F3/F4/etc.
+        behave as global navigation instead of trapping the user until Esc.
+        """
+        action = self.action_for_function_key(ch)
+        if not action:
+            return False
+        if action == current_action:
+            return False
+        self.dispatch_command_action(action)
+        return True
+
     def open_help(self) -> None:
         # F1 is now an actionable command menu, not only a static help page.
         # Function keys work while this menu is open, Enter launches the
@@ -1264,6 +1358,8 @@ class GeminiCursesApp:
             self.stdscr.refresh()
 
             ch = self.stdscr.getch()
+            if self.handle_global_nav_key(ch, current_action="help"):
+                return
             if ch == curses.KEY_MOUSE:
                 try:
                     _mid, _x, y, _z, state = curses.getmouse()
@@ -1379,19 +1475,138 @@ class GeminiCursesApp:
                 self.status = f"model saved: {model.model_id}"
 
     def open_model_selector(self) -> None:
-        if not self.cfg.api_key:
-            self.show_message("MODEL SELECTOR", ["No API key is loaded. Press F3 to paste one."])
-            return
-        self.status = "loading model list..."
-        self.draw()
-        models, error = fetch_models(self.cfg)
-        if error:
-            self.show_message("MODEL LIST ERROR", wrap_for_width(error, 70))
-            return
-        if not models:
-            self.show_message("MODEL SELECTOR", ["No generateContent models returned by the API."])
-            return
+        """Open a local model menu without immediately contacting Google.
 
+        The previous selector fetched Google's model list as soon as F2 was
+        pressed. That was bad for offline use, API conservatism, and accidental
+        keypresses. This landing screen makes network access explicit.
+        """
+        selected = 0
+        top_index = 0
+        while True:
+            cached, cache_error, cache_updated = load_model_cache(self.cfg)
+            cache_status = f"cached models: {len(cached)} | updated: {cache_updated}" if not cache_error else "cached models: none"
+            rows = [
+                ("Use cached model list", "cached"),
+                ("Update model list from Google", "update"),
+                ("Test current/fallback model", "test-current"),
+                ("Enter model ID manually", "manual"),
+                ("Save current model to config", "save-current"),
+                ("Back", "back"),
+            ]
+            selected = min(selected, len(rows) - 1)
+            self.stdscr.erase()
+            height, width = self.stdscr.getmaxyx()
+            visible_h = max(1, height - 7)
+            self.safe_addstr(0, 0, "MODEL MENU", width, self.reverse_attr())
+            self.safe_addstr(1, 0, f"Current model: {self.model_label()}", width)
+            self.safe_addstr(2, 0, cache_status, width, self.dim_attr())
+            self.safe_addstr(3, 0, "Enter/click=choose | F-keys jump screens | Esc/q=return", width, self.dim_attr())
+            self.safe_addstr(4, 0, "_" * width, width, self.dim_attr())
+
+            if selected < top_index:
+                top_index = selected
+            elif selected >= top_index + visible_h:
+                top_index = selected - visible_h + 1
+
+            for row in range(visible_h):
+                idx = top_index + row
+                if idx >= len(rows):
+                    break
+                label, action = rows[idx]
+                attr = self.reverse_attr() if idx == selected else 0
+                self.safe_addstr(5 + row, 0, label, width, attr)
+
+            self.safe_addstr(height - 1, 0, "Network call only happens when you choose Update model list from Google.", width, self.reverse_attr())
+            self.stdscr.refresh()
+            ch = self.stdscr.getch()
+            if self.handle_global_nav_key(ch, current_action="models"):
+                return
+            if ch == curses.KEY_MOUSE:
+                try:
+                    _mid, _x, y, _z, state = curses.getmouse()
+                except curses.error:
+                    continue
+                delta = self.mouse_wheel_delta(state)
+                if delta > 0:
+                    selected = max(0, selected - MOUSE_SCROLL_LINES)
+                    continue
+                if delta < 0:
+                    selected = min(len(rows) - 1, selected + MOUSE_SCROLL_LINES)
+                    continue
+                if self.mouse_button1(state) and 5 <= y < 5 + visible_h:
+                    idx = top_index + (y - 5)
+                    if 0 <= idx < len(rows):
+                        selected = idx
+                        if self.mouse_button1_double(state):
+                            ch = 10
+                    else:
+                        continue
+                else:
+                    continue
+            if ch in (27, ord("q"), ord("Q")):
+                self.status = "model menu closed"
+                return
+            if ch == curses.KEY_UP:
+                selected = max(0, selected - 1)
+            elif ch == curses.KEY_DOWN:
+                selected = min(len(rows) - 1, selected + 1)
+            elif ch == curses.KEY_PPAGE:
+                selected = max(0, selected - visible_h)
+            elif ch == curses.KEY_NPAGE:
+                selected = min(len(rows) - 1, selected + visible_h)
+            elif ch in (10, 13, curses.KEY_ENTER):
+                action = rows[selected][1]
+                if action == "back":
+                    return
+                if action == "cached":
+                    models, error, updated = load_model_cache(self.cfg)
+                    if error:
+                        self.show_message("MODEL CACHE", [error, "", "Choose Update model list from Google to create a cache."])
+                    else:
+                        self.open_model_list_selector(models, f"CACHED MODEL LIST updated {updated}")
+                    continue
+                if action == "update":
+                    if not self.cfg.api_key:
+                        self.show_message("MODEL UPDATE", ["No API key loaded. Press F3 to paste one."])
+                        continue
+                    self.status = "updating model cache from Google..."
+                    self.draw()
+                    models, error, updated = update_model_cache(self.cfg)
+                    if error:
+                        self.show_message("MODEL UPDATE ERROR", wrap_for_width(error, 70))
+                    else:
+                        self.show_message("MODEL UPDATE", [f"Cached {len(models)} models.", f"Updated: {updated}"])
+                        self.open_model_list_selector(models, f"UPDATED MODEL LIST {updated}")
+                    continue
+                if action == "test-current":
+                    model = ModelInfo(
+                        model_id=normalize_model_id(self.cfg.effective_model),
+                        api_name=f"models/{normalize_model_id(self.cfg.effective_model)}",
+                        display_name=normalize_model_id(self.cfg.effective_model),
+                        description="Current configured or fallback model.",
+                    )
+                    self.test_model_interactive(model)
+                    continue
+                if action == "manual":
+                    model_id = self.text_input_modal("MODEL ID", "Enter Gemini model ID:", normalize_model_id(self.cfg.effective_model))
+                    if model_id:
+                        self.cfg.model = normalize_model_id(model_id)
+                        self.status = f"activated model: {self.cfg.model}"
+                        self.transcript.append(TranscriptItem("system", f"Model manually activated: {self.cfg.model}"))
+                        if self.ask_yes_no("SAVE MODEL", f"Save MODEL={self.cfg.model} to config?", default=True):
+                            set_config_value(self.cfg, "MODEL", self.cfg.model)
+                            self.status = f"model saved: {self.cfg.model}"
+                    continue
+                if action == "save-current":
+                    set_config_value(self.cfg, "MODEL", normalize_model_id(self.cfg.effective_model))
+                    self.status = f"model saved: {normalize_model_id(self.cfg.effective_model)}"
+                    return
+
+    def open_model_list_selector(self, models: List[ModelInfo], title: str) -> None:
+        if not models:
+            self.show_message("MODEL LIST", ["No models available."])
+            return
         selected = 0
         current = normalize_model_id(self.cfg.effective_model)
         for idx, model in enumerate(models):
@@ -1404,9 +1619,9 @@ class GeminiCursesApp:
             self.stdscr.erase()
             height, width = self.stdscr.getmaxyx()
             visible_h = max(1, height - 7)
-            self.safe_addstr(0, 0, "MODEL SELECTOR", width, self.reverse_attr())
+            self.safe_addstr(0, 0, title, width, self.reverse_attr())
             self.safe_addstr(1, 0, f"Current model: {self.model_label()}", width)
-            self.safe_addstr(2, 0, "Enter=activate | t=test | i=info | s=save highlighted | Esc/q=cancel | wheel=scroll", width, self.dim_attr())
+            self.safe_addstr(2, 0, "Enter=activate | t=test | i=info | s=save | F-keys jump screens | Esc/q=back", width, self.dim_attr())
             self.safe_addstr(3, 0, "_" * width, width, self.dim_attr())
             if selected < top_index:
                 top_index = selected
@@ -1428,6 +1643,8 @@ class GeminiCursesApp:
             self.safe_addstr(height - 1, 0, f"{selected + 1}/{len(models)}", width, self.dim_attr())
             self.stdscr.refresh()
             ch = self.stdscr.getch()
+            if self.handle_global_nav_key(ch, current_action="models"):
+                return
             if ch == curses.KEY_MOUSE:
                 try:
                     _mid, _x, y, _z, state = curses.getmouse()
@@ -1445,12 +1662,10 @@ class GeminiCursesApp:
                     if 0 <= idx < len(models):
                         selected = idx
                         if self.mouse_button1_double(state):
-                            self.cfg.model = models[selected].model_id
-                            self.status = f"activated model: {self.cfg.model}"
-                            return
+                            ch = 10
                     continue
             if ch in (27, ord("q"), ord("Q")):
-                self.status = "model selection cancelled"
+                self.status = "model list closed"
                 return
             if ch in (ord("i"), ord("I")):
                 self.show_model_info(models[selected])
@@ -1461,6 +1676,7 @@ class GeminiCursesApp:
                 continue
             if ch in (ord("s"), ord("S")):
                 set_config_value(self.cfg, "MODEL", models[selected].model_id)
+                self.cfg.model = models[selected].model_id
                 self.status = f"model saved: {models[selected].model_id}"
                 return
             if ch in (10, 13, curses.KEY_ENTER):
@@ -1532,6 +1748,8 @@ class GeminiCursesApp:
             self.safe_addstr(height - 1, 0, f"{selected + 1}/{len(names)}", width, self.dim_attr())
             self.stdscr.refresh()
             ch = self.stdscr.getch()
+            if self.handle_global_nav_key(ch, current_action="sessions"):
+                return
             if ch == curses.KEY_MOUSE:
                 try:
                     _mid, _x, y, _z, state = curses.getmouse()
@@ -1574,41 +1792,60 @@ class GeminiCursesApp:
                 selected = min(len(names) - 1, selected + visible_h)
 
     def open_options_menu(self) -> None:
+        """w3m-style options form.
+
+        This is intentionally not just a config-file viewer. Boolean options
+        toggle with Space. Text/integer/path fields edit with Enter. Changes are
+        staged locally and saved together with s. Esc/q cancels.
+        """
+        fields = [
+            {"key": "MODEL", "label": "Model", "type": "text", "value": self.cfg.model},
+            {"key": "CONTEXT_TURNS", "label": "Context turns", "type": "int", "value": str(self.cfg.context_turns)},
+            {"key": "SESSION_DIR", "label": "Session directory", "type": "path", "value": str(self.cfg.session_dir)},
+            {"key": "ATTACHMENT_DIR", "label": "Attachment directory", "type": "path", "value": str(self.cfg.effective_attachment_dir)},
+            {"key": "EDITOR", "label": "External editor", "type": "text", "value": self.cfg.editor},
+            {"key": "MODEL_TEST_PROMPT", "label": "Model test prompt", "type": "text", "value": self.cfg.model_test_prompt},
+            {"key": "INPUT_PLACEHOLDER", "label": "Input placeholder", "type": "text", "value": self.cfg.input_placeholder},
+            {"key": "MONOCHROME", "label": "Monochrome mode", "type": "bool", "value": bool(self.cfg.monochrome)},
+            {"key": "STARTUP_NOTICE", "label": "Startup notice", "type": "bool", "value": bool(self.cfg.startup_notice)},
+        ]
         selected = 0
         top_index = 0
+        dirty = False
+
         while True:
-            options = [
-                ("MODEL", self.cfg.model),
-                ("CONTEXT_TURNS", str(self.cfg.context_turns)),
-                ("SESSION_DIR", str(self.cfg.session_dir)),
-                ("ATTACHMENT_DIR", str(self.cfg.effective_attachment_dir)),
-                ("EDITOR", self.cfg.effective_editor),
-                ("GITHUB_URL", self.cfg.github_url),
-                ("MODEL_TEST_PROMPT", self.cfg.model_test_prompt),
-                ("INPUT_PLACEHOLDER", self.cfg.input_placeholder),
-                ("MONOCHROME", "1" if self.cfg.monochrome else "0"),
-                ("STARTUP_NOTICE", "1" if self.cfg.startup_notice else "0"),
-            ]
-            selected = min(selected, len(options) - 1)
             self.stdscr.erase()
             height, width = self.stdscr.getmaxyx()
-            visible_h = max(1, height - 4)
-            self.safe_addstr(0, 0, "OPTIONS MENU", width, self.reverse_attr())
-            self.safe_addstr(1, 0, "Enter=edit/save | Esc/q=cancel | API key is handled by F3 | wheel=scroll", width, self.dim_attr())
-            self.safe_addstr(2, 0, "_" * width, width, self.dim_attr())
+            visible_h = max(1, height - 7)
+            self.safe_addstr(0, 0, "OPTIONS", width, self.reverse_attr())
+            self.safe_addstr(1, 0, "Space=toggle | Enter=edit | s=save all | r=reset | F-keys jump screens | Esc/q=cancel", width, self.dim_attr())
+            self.safe_addstr(2, 0, "API keys are managed with F3. Project URL is in F9 Credits, not Options.", width, self.dim_attr())
+            self.safe_addstr(3, 0, "_" * width, width, self.dim_attr())
+
             if selected < top_index:
                 top_index = selected
             elif selected >= top_index + visible_h:
                 top_index = selected - visible_h + 1
+
             for row in range(visible_h):
                 idx = top_index + row
-                if idx >= len(options):
+                if idx >= len(fields):
                     break
-                key, value = options[idx]
+                field = fields[idx]
+                if field["type"] == "bool":
+                    mark = "[x]" if field["value"] else "[ ]"
+                    line = f"{mark} {field['label']}"
+                else:
+                    line = f"{field['label']:<22} [{field['value']}]"
                 attr = self.reverse_attr() if idx == selected else 0
-                self.safe_addstr(3 + row, 0, f"{key}={value}", width, attr)
+                self.safe_addstr(4 + row, 0, line, width, attr)
+
+            state = "modified" if dirty else "unchanged"
+            self.safe_addstr(height - 1, 0, f"{selected + 1}/{len(fields)} | {state}", width, self.reverse_attr())
             self.stdscr.refresh()
             ch = self.stdscr.getch()
+            if self.handle_global_nav_key(ch, current_action="options"):
+                return
             if ch == curses.KEY_MOUSE:
                 try:
                     _mid, _x, y, _z, state = curses.getmouse()
@@ -1617,45 +1854,86 @@ class GeminiCursesApp:
                 delta = self.mouse_wheel_delta(state)
                 if delta > 0:
                     selected = max(0, selected - MOUSE_SCROLL_LINES)
-                elif delta < 0:
-                    selected = min(len(options) - 1, selected + MOUSE_SCROLL_LINES)
-                elif self.mouse_button1(state) and 3 <= y < 3 + visible_h:
-                    idx = top_index + (y - 3)
-                    if 0 <= idx < len(options):
+                    continue
+                if delta < 0:
+                    selected = min(len(fields) - 1, selected + MOUSE_SCROLL_LINES)
+                    continue
+                if self.mouse_button1(state) and 4 <= y < 4 + visible_h:
+                    idx = top_index + (y - 4)
+                    if 0 <= idx < len(fields):
                         selected = idx
                         if self.mouse_button1_double(state):
                             ch = 10
+                    else:
+                        continue
                 else:
                     continue
+
             if ch in (27, ord("q"), ord("Q")):
+                if dirty and not self.ask_yes_no("DISCARD OPTIONS", "Discard unsaved option changes?", default=False):
+                    continue
+                self.status = "options cancelled"
                 return
             if ch == curses.KEY_UP:
                 selected = max(0, selected - 1)
             elif ch == curses.KEY_DOWN:
-                selected = min(len(options) - 1, selected + 1)
+                selected = min(len(fields) - 1, selected + 1)
             elif ch == curses.KEY_PPAGE:
                 selected = max(0, selected - visible_h)
             elif ch == curses.KEY_NPAGE:
-                selected = min(len(options) - 1, selected + visible_h)
+                selected = min(len(fields) - 1, selected + visible_h)
+            elif ch in (9,):
+                selected = (selected + 1) % len(fields)
+            elif ch in (ord(" "),):
+                field = fields[selected]
+                if field["type"] == "bool":
+                    field["value"] = not bool(field["value"])
+                    dirty = True
             elif ch in (10, 13, curses.KEY_ENTER):
-                key, value = options[selected]
-                new = self.text_input_modal("EDIT OPTION", f"Enter value for {key}:", value)
-                if new is None:
-                    continue
-                set_config_value(self.cfg, key, new)
-                if key == "MODEL": self.cfg.model = normalize_model_id(new)
-                elif key == "CONTEXT_TURNS": self.cfg.context_turns = parse_positive_int(new, self.cfg.context_turns)
-                elif key == "SESSION_DIR": self.cfg.session_dir = expand_path(new)
-                elif key == "ATTACHMENT_DIR": self.cfg.attachment_dir = expand_path(new); self.attachment_dir = self.cfg.effective_attachment_dir
-                elif key == "EDITOR": self.cfg.editor = new
-                elif key == "GITHUB_URL": self.cfg.github_url = new
-                elif key == "MODEL_TEST_PROMPT": self.cfg.model_test_prompt = new
-                elif key == "INPUT_PLACEHOLDER": self.cfg.input_placeholder = new
-                elif key == "MONOCHROME": self.cfg.monochrome = parse_bool(new, self.cfg.monochrome)
-                elif key == "STARTUP_NOTICE": self.cfg.startup_notice = parse_bool(new, self.cfg.startup_notice)
+                field = fields[selected]
+                if field["type"] == "bool":
+                    field["value"] = not bool(field["value"])
+                    dirty = True
+                else:
+                    new = self.text_input_modal("EDIT OPTION", f"Enter value for {field['key']}:", str(field["value"]))
+                    if new is not None:
+                        if field["type"] == "int":
+                            try:
+                                int(new)
+                            except ValueError:
+                                self.show_message("OPTIONS", [f"{field['key']} requires an integer."])
+                                continue
+                        field["value"] = new
+                        dirty = True
+            elif ch in (ord("r"), ord("R")):
+                return self.open_options_menu()
+            elif ch in (ord("s"), ord("S")):
+                for field in fields:
+                    key = str(field["key"])
+                    value = "1" if field["type"] == "bool" and field["value"] else "0" if field["type"] == "bool" else str(field["value"])
+                    set_config_value(self.cfg, key, value)
+                    if key == "MODEL":
+                        self.cfg.model = normalize_model_id(value)
+                    elif key == "CONTEXT_TURNS":
+                        self.cfg.context_turns = parse_positive_int(value, self.cfg.context_turns)
+                    elif key == "SESSION_DIR":
+                        self.cfg.session_dir = expand_path(value)
+                    elif key == "ATTACHMENT_DIR":
+                        self.cfg.attachment_dir = expand_path(value)
+                        self.attachment_dir = self.cfg.effective_attachment_dir
+                    elif key == "EDITOR":
+                        self.cfg.editor = value
+                    elif key == "MODEL_TEST_PROMPT":
+                        self.cfg.model_test_prompt = value
+                    elif key == "INPUT_PLACEHOLDER":
+                        self.cfg.input_placeholder = value
+                    elif key == "MONOCHROME":
+                        self.cfg.monochrome = bool(field["value"])
+                    elif key == "STARTUP_NOTICE":
+                        self.cfg.startup_notice = bool(field["value"])
                 self.cfg.session_dir.mkdir(parents=True, exist_ok=True)
                 self.cfg.effective_attachment_dir.mkdir(parents=True, exist_ok=True)
-                self.status = f"saved option: {key}"
+                self.status = "options saved"
                 return
 
     def open_memory_menu(self) -> None:
@@ -1669,6 +1947,8 @@ class GeminiCursesApp:
                 self.safe_addstr(3 + idx, 0, item, width)
             self.stdscr.refresh()
             ch = self.stdscr.getch()
+            if self.handle_global_nav_key(ch, current_action="memory"):
+                return
             if ch in (ord("q"), ord("Q"), 27): return
             if ch in (ord("v"), ord("V")):
                 self.show_message("CURRENT MEMORY", self.context_buffer or ["Memory is empty."])
@@ -1729,6 +2009,8 @@ class GeminiCursesApp:
                 self.safe_addstr(3 + row, 0, label, width, attr)
             self.stdscr.refresh()
             ch = self.stdscr.getch()
+            if self.handle_global_nav_key(ch, current_action="files"):
+                return None
             if ch == curses.KEY_MOUSE:
                 try: _mid, _x, y, _z, state = curses.getmouse()
                 except curses.error: continue
@@ -1772,6 +2054,8 @@ class GeminiCursesApp:
             self.stdscr.refresh()
 
             ch = self.stdscr.getch()
+            if self.handle_global_nav_key(ch, current_action="files"):
+                return
             if ch == curses.KEY_MOUSE:
                 try:
                     _mid, _x, y, _z, state = curses.getmouse()
@@ -2037,6 +2321,8 @@ def main() -> int:
         return 0
     if args.models:
         return print_models(cfg)
+    if args.update_models:
+        return print_update_models(cfg)
     if args.test_model:
         return print_model_test(cfg, args.test_model)
     if args.resume and args.session_name:
