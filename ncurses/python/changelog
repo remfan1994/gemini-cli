@@ -1,4 +1,40 @@
 # Changelog
+## 0.7.1
+
+### Added
+- Metadata-based model filtering in the ncurses model selector
+- `MODEL_FILTER_GENERATE_CONTENT` config key
+- `MODEL_FILTER_REQUIRE_TOKENS` config key
+- `MODEL_FILTER_HIDE_PREVIEW` config key
+- `MODEL_MIN_INPUT_TOKENS` config key
+- `MODEL_MIN_OUTPUT_TOKENS` config key
+- `MODEL_SORT_ORDER` config key
+- Model filter screen reachable from the F2 model menu
+- `f` shortcut inside the model selector for filters/sort
+- Filter summary line in the model selector
+- Model metadata badges in model list output
+- CLI model listing now reports active filters to stderr
+- Cached/live model list rows now show input/output token limits and capability badges
+
+### Changed
+- `fetch_models()` now preserves model metadata from the API instead of treating every model as a hidden recommendation target
+- Model selection now emphasizes `listModels` metadata, including `supportedGenerationMethods`, `inputTokenLimit`, and `outputTokenLimit`
+- The model tester remains available, but metadata filtering is now the primary model-selection aid
+- `--models` and `--update-models` apply the same filter settings used by the model selector
+- The F2 model menu now includes filter access before opening cached or updated lists
+
+### Documentation
+- Updated MODEL METADATA FILTERS section in the man page
+- Documented `MODEL_FILTER_GENERATE_CONTENT`
+- Corrected the default model cache path to `~/.cache/gemini-cli/models.json`
+- Updated `MODEL_SORT_ORDER` documented values
+- Clarified that metadata filters do not send model-generation requests
+
+### Notes
+- This release follows the `listModels`/metadata approach rather than reintroducing autoscan.
+- User-operated testing remains available for one selected model at a time.
+- Metadata filters help users narrow model choices without probing every model.
+
 ## 0.7.0
 
 ### Added
