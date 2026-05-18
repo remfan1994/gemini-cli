@@ -1,4 +1,44 @@
 # Changelog
+## 2.5
+
+### Added
+- Temporary remfan1994 Project Lead startup notice for new blank sessions
+- `STARTUP_NOTICE` config key
+- `MODEL_TEST_PROMPT` config key
+- `--test-model <model_id>` command
+- `--test-model <model_id> --save` command
+- User-operated model testing workflow
+- Context snapshots saved into session logs
+- Context snapshot preference during resume-time memory rebuild
+- Removed-autoscan explanation message for users who still run `--autoscan-model`
+
+### Removed
+- Active `--autoscan-model` behavior
+- Automatic probing of all available models
+
+### Changed
+- Bash model workflow now mirrors the ncurses philosophy: list models, choose one, test it, then save it if desired
+- `--select-model` now offers to test the selected model before saving
+- Startup notice is displayed as a transcript-style message from `remfan1994`
+- Startup notice is not logged, not sent to Gemini, and not stored in memory
+- Startup notice is removed from the visible terminal when the first message is sent
+- Resume memory rebuild now prefers the latest saved context snapshot
+- Help output now documents `--test-model`, `MODEL_TEST_PROMPT`, and `STARTUP_NOTICE`
+
+### Documentation
+- Updated man page synopsis with `--test-model`
+- Removed autoscan from normal documented workflow
+- Added STARTUP NOTICE section
+- Added MODEL TESTING section
+- Updated MODEL SELECTION section
+- Updated CONFIGURATION section
+- Updated MEMORY MODEL section
+- Updated LIMITATIONS section
+
+### Notes
+- `--autoscan-model` is intentionally no longer an active workflow.
+- The Bash version remains line-oriented and does not attempt to clone ncurses menus.
+- The Project Lead notice is temporary UI text only, not conversation context.
 ## 2.4
 
 ### Added
