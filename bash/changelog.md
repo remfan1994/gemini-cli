@@ -1,4 +1,58 @@
 # Changelog
+## 2.6
+
+### Added
+- Cached model list support via `~/.config/gemini-cli/models-cache.json`
+- `--update-models` command to refresh the model cache from Google
+- `--models --all` to bypass model filters
+- Metadata-based model filtering for Bash model listings and selection
+- `MODEL_FILTER_GENERATE_CONTENT` config key
+- `MODEL_FILTER_REQUIRE_TOKENS` config key
+- `MODEL_FILTER_HIDE_PREVIEW` config key
+- `MODEL_MIN_INPUT_TOKENS` config key
+- `MODEL_MIN_OUTPUT_TOKENS` config key
+- `MODEL_SORT_ORDER` config key
+- `--config` command for line-oriented options summary
+- `--set KEY VALUE` command for config editing
+- `--unset KEY` command for config editing
+- `--forget-api-key` command
+- `--rename-session OLD NEW` command
+- `--show-memory <session>` command
+- `--edit-memory <session>` command
+- `--clear-memory <session>` command
+- `--editor-prompt [session]` command
+- `--attach FILE` support for local prompt attachments
+- Text-file prompt attachment support
+- Binary/media inlineData-style attachment support where model/API allows it
+- Generated inlineData response attachment saving where returned by the API
+- `--credits` command
+- `MAX_ATTACHMENT_BYTES` config key
+- `EDITOR` config key
+
+### Changed
+- Bash now has line-oriented options/config parity with the ncurses options form
+- `--models` now uses the cached model list when available
+- `--select-model` now uses the same metadata filters as `--models`
+- Model display now includes token limits and metadata badges
+- Bash remains command-oriented instead of imitating ncurses menus
+- External editor support is provided as a one-shot prompt workflow
+- File attachment support is command-line based rather than file-browser based
+
+### Documentation
+- Updated man page synopsis with new Bash commands
+- Added MODEL CACHE section
+- Added MODEL FILTERS section
+- Added OPTIONS AND CONFIG section
+- Expanded ATTACHMENT SYSTEM section
+- Added EXTERNAL EDITOR section
+- Added CREDITS section
+- Updated CONFIGURATION section with new keys
+- Updated LIMITATIONS section
+
+### Notes
+- This release brings Bash closer to ncurses 0.7.1 capability parity without adding full-screen UI behavior.
+- The Bash version remains the lightweight fallback and scriptable utility implementation.
+- The ncurses version remains the preferred implementation for interactive menus, mouse support, and full-screen workflows.
 ## 2.5
 
 ### Added
