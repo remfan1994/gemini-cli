@@ -1,0 +1,359 @@
+GEMINI-CURSES(1)           User Commands           GEMINI-CURSES(1)
+
+NAME
+    gemini-curses - ncurses terminal interface for the Gemini API
+
+SYNOPSIS
+    gemini-curses
+    gemini-curses <session_name>
+    gemini-curses --resume <session_name>
+    gemini-curses --list
+    gemini-curses --models
+    gemini-curses --test-model <model_id>
+    gemini-curses --version
+    gemini-curses --help
+
+DESCRIPTION
+    gemini-curses is a Python ncurses interface for Gemini. It is the
+    full-screen terminal interface companion to the Bash gemini-cli tool.
+
+    It provides:
+        - scrollable transcript area
+        - multiline input box
+        - wrapped input display
+        - mousewheel scrolling
+        - mouse-assisted input cursor placement
+        - named and resumable sessions
+        - session rename support
+        - session file browser
+        - timestamped logs
+        - rolling conversation context
+        - memory snapshot storage in session logs
+        - view/edit current memory
+        - attachment extraction for code blocks
+        - local file attachment support
+        - generated inlineData attachment saving
+        - in-app model selection
+        - user-operated model testing
+        - in-app API key management
+        - options menu for config values
+        - external editor support
+        - credits/about screen
+
+USAGE
+    First-time setup from inside the interface:
+
+        gemini-curses
+            Press F3 to paste an API key.
+            Press F2 to choose and test a model.
+
+    Start a normal timestamped chat:
+
+        gemini-curses
+
+    Start a named full-screen chat:
+
+        gemini-curses android-backup
+
+    Resume a named chat:
+
+        gemini-curses --resume android-backup
+
+    List saved chats:
+
+        gemini-curses --list
+
+    List currently available Gemini models:
+
+        gemini-curses --models
+
+    Test one model from the shell:
+
+        gemini-curses --test-model gemini-2.5-flash
+
+SESSION MANAGEMENT
+    gemini-curses
+        Start a new timestamped session.
+
+    gemini-curses <name>
+        Start or open a named session.
+
+    gemini-curses --resume <name>
+        Resume an existing named session. If the session does not exist,
+        the command exits with an error.
+
+    gemini-curses --list
+        List saved sessions.
+
+    F4
+        Open the in-app session browser. The session browser can open an
+        existing session, start a new timestamped session, or rename the
+        current session.
+
+CONTROLS
+    F1
+        Show help.
+
+    Enter
+        Insert newline in the input box.
+
+    Ctrl+G
+        Send the current message.
+
+    F2
+        Open the model selector. The selector retrieves the model list from
+        the Gemini models endpoint.
+
+        Inside the selector:
+            Enter      Activate selected model
+            t          Test selected model
+            s          Save selected model to config
+            i          View model metadata
+            q/Esc      Cancel
+
+    F3
+        Open API-key manager.
+
+        API-key actions:
+            - paste key for current session only
+            - paste key and save to config
+            - forget runtime key
+            - remove GEMINI_API_KEY from config
+
+    F4
+        Open session browser.
+
+    F5
+        Open options menu.
+
+    F6
+        Open memory menu.
+
+    F7
+        Open file/attachment menu.
+
+    F8
+        Edit current prompt in external editor.
+
+    F9
+        Show credits/about screen.
+
+    F10
+    Ctrl+Q
+        Quit the interface.
+
+    PgUp
+        Scroll transcript upward.
+
+    PgDn
+        Scroll transcript downward.
+
+    Arrow keys
+        Move cursor inside the input box or navigate selectors.
+
+    Home
+    End
+        Move cursor to beginning or end of current input line.
+
+    Ctrl+U
+        Clear current input.
+
+    Ctrl+L
+        Redraw screen.
+
+    Tab
+        Insert four spaces.
+
+MOUSE SUPPORT
+    Mouse support depends on terminal emulator support for ncurses mouse
+    events.
+
+    Main chat view:
+
+        Mouse wheel up
+            Scroll transcript upward toward older output.
+
+        Mouse wheel down
+            Scroll transcript downward toward newer output.
+
+        Left click in input area
+            Place the input cursor near the clicked position.
+
+    Lists and selectors:
+
+        Mouse wheel up/down
+            Move through visible rows.
+
+        Left click row
+            Highlight or select the clicked row.
+
+        Double click row
+            Activate the clicked row where supported.
+
+MODEL DISCOVERY
+    Available Gemini models can be listed from the command line:
+
+        gemini-curses --models
+
+    They can also be listed directly with curl:
+
+        curl "https://generativelanguage.googleapis.com/v1beta/models?key=YOUR_API_KEY"
+
+    Inside the ncurses interface, press F2 to open the model selector.
+
+MODEL TESTING
+    Autoscan has been removed.
+
+    Instead of probing every model until one works, gemini-curses now uses a
+    user-operated model tester.
+
+    In the model selector:
+
+        t
+            Test the selected model with MODEL_TEST_PROMPT and display the
+            raw response.
+
+    From the shell:
+
+        gemini-curses --test-model <model_id>
+
+    The tester sends one request to the selected model. The user reads the
+    response and decides whether to activate or save the model.
+
+CONFIGURATION
+    Configuration file:
+
+        ~/.config/gemini-cli/config
+
+    The ncurses version intentionally uses the same configuration file as
+    the Bash version.
+
+    Supported keys:
+
+        MODEL
+            Gemini model identifier.
+
+            If MODEL is not configured, gemini-curses labels
+            gemini-2.5-flash as a fallback model. This is not a promise that
+            the fallback is best or permanently available.
+
+        CONTEXT_TURNS
+            Number of recent user/assistant exchanges sent back to Gemini as
+            conversation context.
+
+            Default: 12
+
+        HISTORY_LIMIT
+            Legacy alias for CONTEXT_TURNS. Kept for compatibility with older
+            config files.
+
+        GEMINI_API_KEY
+            Optional API key. Environment variable takes priority.
+
+        SESSION_DIR
+            Directory used for session log storage.
+            Default: ~/.gpt
+
+        ATTACHMENT_DIR
+            Directory used for extracted code artifacts and generated inline
+            attachments.
+            Default: SESSION_DIR/attachments
+
+        EDITOR
+            External editor command used by F8 and memory editing.
+
+            If unset, gemini-curses uses VISUAL, then EDITOR, then common
+            editor fallbacks where available.
+
+        MODEL_TEST_PROMPT
+            Prompt sent by the model tester.
+
+        MAX_ATTACHMENT_BYTES
+            Maximum local file size allowed for prompt attachments.
+
+ENVIRONMENT
+    GEMINI_API_KEY
+        Preferred API key source.
+
+        Precedence:
+            1. Environment variable
+            2. Config file
+            3. F3 runtime API-key input
+
+    VISUAL
+    EDITOR
+        Used for external editor support if EDITOR is not set in config.
+
+API KEY STORAGE
+    API keys are not saved by default when pasted with F3.
+
+    Saving the API key to config is optional and must be selected explicitly.
+    Saving stores the key in plaintext.
+
+FILES
+    ~/.config/gemini-cli/config
+        Configuration file.
+
+    SESSION_DIR/*.log
+        Session log files.
+
+    ATTACHMENT_DIR/
+        Extracted code block attachments, generated inlineData attachments,
+        and other saved artifacts.
+
+ATTACHMENT SYSTEM
+    Code blocks returned by Gemini are extracted from terminal display and
+    saved into ATTACHMENT_DIR.
+
+    The original raw Gemini response remains preserved in the session log.
+
+    Local files can be attached to the next prompt through F7.
+
+    Text-like files are included as text parts. Binary/media files are sent as
+    Gemini REST inlineData parts when possible.
+
+    Generated inlineData parts returned by Gemini are saved into ATTACHMENT_DIR
+    and represented in the transcript by attachment notices.
+
+MEMORY MODEL
+    gemini-curses keeps a rolling conversation context in memory.
+
+    CONTEXT_TURNS controls how many recent user/assistant exchanges are sent
+    back to Gemini with each request.
+
+    Memory snapshots are written into the session log as system entries.
+    When resuming an existing session, gemini-curses prefers the latest memory
+    snapshot and falls back to rebuilding context from recent chat entries.
+
+    F6 opens the memory menu. The memory menu can view, edit, clear, or rebuild
+    current memory.
+
+EXTERNAL EDITOR
+    F8 opens the current prompt in an external editor.
+
+    The editor is chosen in this order:
+        1. EDITOR config key
+        2. VISUAL environment variable
+        3. EDITOR environment variable
+        4. nano or vi if found
+
+CREDITS
+    F9 opens the credits/about screen.
+
+LIMITATIONS
+    - Requires Python 3 with curses support
+    - Requires internet access
+    - API quota restrictions apply
+    - Model testing verifies only the single selected model
+    - Model testing does not guarantee overall model quality
+    - Mouse support depends on terminal emulator support for ncurses mouse events
+    - Terminal text selection and copy behavior remain terminal-emulator features
+    - Drag selection is not implemented by gemini-curses
+    - Local media attachment support depends on Gemini model/API support
+    - Generated image/video support depends on response parts returned by the model
+
+VERSION
+    gemini-curses version 0.6.0
+
+AUTHOR
+    Part of the gemini-terminal-tools project.
