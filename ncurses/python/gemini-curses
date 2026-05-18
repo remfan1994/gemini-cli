@@ -2,11 +2,12 @@
 """
 gemini-curses
 
-Ncurses-based Gemini terminal interface.
+Ncurses-based Gemini terminal interface for the gemini-terminal-tools project.
 
-This version is the full-screen terminal companion to the Bash gemini-cli
-implementation. It keeps the same config-file philosophy while fixing the
-interactive input problems that are difficult to solve cleanly in shell.
+This release removes automatic model scanning and replaces it with an explicit,
+user-operated model tester. It also adds session browsing/renaming, config
+options, memory viewing/editing, external editor support, credits, and file
+attachment support.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ import json
 import mimetypes
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -31,43 +33,31 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-VERSION = "0.6.0"
+VERSION = "0.6.1"
 PROGRAM = "gemini-curses"
 FALLBACK_MODEL = "gemini-2.5-flash"
-PROJECT_URL = "https://github.com/remfan1994/gemini-terminal-tools"
-PROJECT_NOTICE = (
-    "I strongly encourage everyone to get cruetly-free VEGETARIAN food and "
-    "remember the 'bloodguilt' curse from the Bible.  -Project Lead, remfan1994"
-)
+DEFAULT_MODEL_TEST_PROMPT = "Please reply with one short sentence confirming this model is available for text generation."
+DEFAULT_GITHUB_URL = "https://github.com/remfan1994/gemini-terminal-tools"
+PROJECT_NOTICE = "I strongly encourage everyone to get cruetly-free VEGETARIAN food and remember the 'bloodguilt' curse from the Bible.  -Project Lead, remfan1994"
+INPUT_PLACEHOLDER_DEFAULT = "Type your chat message here..."
 MOUSE_SCROLL_LINES = 3
-DEFAULT_MODEL_TEST_PROMPT = (
-    "Please reply with a short sentence confirming this model is available "
-    "for text generation."
-)
-DEFAULT_MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
+MAX_INLINE_ATTACHMENT_BYTES = 20 * 1024 * 1024
 
 
 # ---------------------------------------------------------------------------
 # Configuration model
 # ---------------------------------------------------------------------------
-# The ncurses edition intentionally uses the same config file as the Bash
-# edition. A user can keep one ~/.config/gemini-cli/config file and use either
-# interface.
+# Shared config file:
+#   ~/.config/gemini-cli/config
 #
-# Model discovery note:
-#   Users can list available Gemini models with the Gemini API models endpoint:
-#     curl "https://generativelanguage.googleapis.com/v1beta/models?key=YOUR_API_KEY"
-#   This program also exposes that through --models and the in-app F2 selector.
+# Preferred memory terminology:
+#   CONTEXT_TURNS
 #
-# Model testing note:
-#   Autoscan has been removed. The safer workflow is user-operated testing:
-#   select one model, send one clearly documented test request, read the raw
-#   response, then activate/save the model only if the user accepts it.
+# Legacy compatibility:
+#   HISTORY_LIMIT is still accepted as an alias for CONTEXT_TURNS.
 #
-# Memory terminology note:
-#   CONTEXT_TURNS is the preferred config key. It means recent user/assistant
-#   exchanges sent back to Gemini for conversational continuity. HISTORY_LIMIT
-#   is still accepted as a legacy alias so older configs do not break.
+# Autoscan was intentionally removed. The model workflow is now:
+#   --models / F2 model selector -> select a model -> test selected model -> activate/save
 # ---------------------------------------------------------------------------
 
 
@@ -79,11 +69,12 @@ class Config:
     session_dir: Path = field(default_factory=lambda: Path.home() / ".gpt")
     attachment_dir: Optional[Path] = None
     editor: str = ""
+    github_url: str = DEFAULT_GITHUB_URL
     model_test_prompt: str = DEFAULT_MODEL_TEST_PROMPT
-    max_attachment_bytes: int = DEFAULT_MAX_ATTACHMENT_BYTES
-    config_file: Path = field(
-        default_factory=lambda: Path.home() / ".config" / "gemini-cli" / "config"
-    )
+    monochrome: bool = False
+    input_placeholder: str = INPUT_PLACEHOLDER_DEFAULT
+    startup_notice: bool = True
+    config_file: Path = field(default_factory=lambda: Path.home() / ".config" / "gemini-cli" / "config")
 
     @property
     def effective_model(self) -> str:
@@ -97,9 +88,7 @@ class Config:
 
     @property
     def effective_editor(self) -> str:
-        if self.editor:
-            return self.editor
-        return os.environ.get("VISUAL") or os.environ.get("EDITOR") or ""
+        return self.editor or os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"
 
 
 def expand_path(value: str) -> Path:
@@ -121,6 +110,15 @@ def parse_positive_int(value: str, fallback: int) -> int:
     return max(1, parsed)
 
 
+def parse_bool(value: str, default: bool = False) -> bool:
+    value = value.strip().lower()
+    if value in {"1", "yes", "true", "on", "y"}:
+        return True
+    if value in {"0", "no", "false", "off", "n"}:
+        return False
+    return default
+
+
 def load_config() -> Config:
     cfg = Config()
     env_api_key = os.environ.get("GEMINI_API_KEY", "")
@@ -134,7 +132,6 @@ def load_config() -> Config:
                     continue
                 if "=" not in line:
                     continue
-
                 key, value = line.split("=", 1)
                 key = key.strip()
                 value = value.strip()
@@ -155,11 +152,18 @@ def load_config() -> Config:
                     cfg.attachment_dir = expand_path(value)
                 elif key == "EDITOR":
                     cfg.editor = value
+                elif key == "GITHUB_URL":
+                    cfg.github_url = value or DEFAULT_GITHUB_URL
                 elif key == "MODEL_TEST_PROMPT":
                     if value:
                         cfg.model_test_prompt = value
-                elif key == "MAX_ATTACHMENT_BYTES":
-                    cfg.max_attachment_bytes = parse_positive_int(value, cfg.max_attachment_bytes)
+                elif key == "MONOCHROME":
+                    cfg.monochrome = parse_bool(value, cfg.monochrome)
+                elif key == "INPUT_PLACEHOLDER":
+                    if value:
+                        cfg.input_placeholder = value
+                elif key == "STARTUP_NOTICE":
+                    cfg.startup_notice = parse_bool(value, cfg.startup_notice)
 
     if env_api_key:
         cfg.api_key = env_api_key
@@ -193,19 +197,6 @@ def set_config_value(cfg: Config, key: str, value: str) -> None:
         pass
 
 
-def delete_config_value(cfg: Config, key: str) -> None:
-    if not cfg.config_file.exists():
-        return
-
-    lines = cfg.config_file.read_text(encoding="utf-8", errors="replace").splitlines()
-    new_lines = [line for line in lines if not line.strip().startswith(f"{key}=")]
-    cfg.config_file.write_text("\n".join(new_lines) + ("\n" if new_lines else ""), encoding="utf-8")
-    try:
-        os.chmod(cfg.config_file, 0o600)
-    except OSError:
-        pass
-
-
 # ---------------------------------------------------------------------------
 # Command-line parsing
 # ---------------------------------------------------------------------------
@@ -215,15 +206,12 @@ def parse_args() -> argparse.Namespace:
     if len(sys.argv) == 2 and sys.argv[1] == "help":
         sys.argv[1] = "--help"
 
-    parser = argparse.ArgumentParser(
-        prog=PROGRAM,
-        description="ncurses Gemini terminal interface",
-    )
+    parser = argparse.ArgumentParser(prog=PROGRAM, description="ncurses Gemini terminal interface")
     parser.add_argument("session_name", nargs="?", help="named session to create or open")
     parser.add_argument("--resume", metavar="NAME", help="resume an existing named session")
     parser.add_argument("--list", action="store_true", help="list saved sessions")
     parser.add_argument("--models", action="store_true", help="list available Gemini generateContent models and exit")
-    parser.add_argument("--test-model", metavar="MODEL", help="send one model-test prompt to MODEL and print the response")
+    parser.add_argument("--test-model", metavar="MODEL", help="send the model-test prompt to MODEL and print the response")
     parser.add_argument("--version", action="store_true", help="show version information")
     return parser.parse_args()
 
@@ -264,14 +252,6 @@ class ModelInfo:
 class PendingAttachment:
     path: Path
     mime_type: str
-    mode: str  # text or inlineData
-    size: int
-
-
-@dataclass
-class GeneratedResult:
-    text: str
-    saved_files: List[Path] = field(default_factory=list)
 
 
 def model_endpoint(cfg: Config, model_id: str) -> str:
@@ -283,118 +263,103 @@ def model_endpoint(cfg: Config, model_id: str) -> str:
     )
 
 
-def parse_generated_response(body: str, attachment_dir: Path, session_name: str) -> GeneratedResult:
-    parsed = json.loads(body)
-    text_parts: List[str] = []
-    saved_files: List[Path] = []
-
-    candidates = parsed.get("candidates", [])
-    for candidate in candidates:
-        parts = candidate.get("content", {}).get("parts", [])
-        for part in parts:
-            if "text" in part:
-                text_parts.append(part.get("text", ""))
-            elif "inlineData" in part:
-                blob = part["inlineData"] or {}
-                mime = blob.get("mimeType", "application/octet-stream")
-                data = blob.get("data", "")
-                if data:
-                    path = save_generated_inline_data(data, mime, attachment_dir, session_name)
-                    saved_files.append(path)
-                    text_parts.append(
-                        f"\n[generated attachment saved]\nfile: {path.name}\nlocation: {attachment_dir}\n"
-                    )
-            elif "fileData" in part:
-                file_data = part["fileData"] or {}
-                uri = file_data.get("fileUri", "")
-                mime = file_data.get("mimeType", "")
-                text_parts.append(f"\n[generated file reference]\nuri: {uri}\nmime: {mime}\n")
-
-    combined = "\n".join([part for part in text_parts if part is not None]).strip()
-    if not combined:
-        raise ValueError("Gemini returned no displayable text or file parts")
-
-    return GeneratedResult(combined, saved_files)
+def guess_mime(path: Path) -> str:
+    mime, _encoding = mimetypes.guess_type(str(path))
+    return mime or "application/octet-stream"
 
 
-def extension_for_mime(mime_type: str) -> str:
-    guessed = mimetypes.guess_extension(mime_type or "")
-    if guessed:
-        return guessed
-    if mime_type.startswith("image/"):
-        return ".img"
-    if mime_type.startswith("video/"):
-        return ".video"
-    if mime_type.startswith("audio/"):
-        return ".audio"
-    return ".bin"
+def mime_extension(mime_type: str) -> str:
+    ext = mimetypes.guess_extension(mime_type) or ".bin"
+    if ext == ".jpe":
+        ext = ".jpg"
+    return ext
 
 
-def next_generated_attachment_path(attachment_dir: Path, session_name: str, ext: str) -> Path:
+def build_gemini_parts(prompt_text: str, attachments: List[PendingAttachment]) -> List[dict]:
+    parts: List[dict] = [{"text": prompt_text}]
+
+    for item in attachments:
+        path = item.path
+        mime_type = item.mime_type
+        try:
+            size = path.stat().st_size
+        except OSError:
+            parts.append({"text": f"\n[Attachment unavailable: {path}]"})
+            continue
+
+        if size > MAX_INLINE_ATTACHMENT_BYTES:
+            parts.append({"text": f"\n[Attachment skipped because it is larger than {MAX_INLINE_ATTACHMENT_BYTES} bytes: {path.name}]"})
+            continue
+
+        if mime_type.startswith("text/") or mime_type in {"application/json", "application/xml", "application/x-yaml"}:
+            try:
+                content = path.read_text(encoding="utf-8", errors="replace")
+            except OSError as exc:
+                content = f"[Could not read attachment: {exc}]"
+            parts.append({"text": f"\n\n[Attached text file: {path.name}]\n{content}"})
+        else:
+            try:
+                data = base64.b64encode(path.read_bytes()).decode("ascii")
+            except OSError as exc:
+                parts.append({"text": f"\n[Could not read binary attachment {path.name}: {exc}]"})
+                continue
+            parts.append({"inline_data": {"mime_type": mime_type, "data": data}})
+
+    return parts
+
+
+def save_inline_response_parts(parsed: dict, attachment_dir: Path, session_name: str) -> str:
+    notices: List[str] = []
     attachment_dir.mkdir(parents=True, exist_ok=True)
-    highest = 0
-    pattern = re.compile(rf"^{re.escape(session_name)}-generated-(\d{{2,}}){re.escape(ext)}$")
-    for path in attachment_dir.glob(f"{session_name}-generated-*{ext}"):
-        match = pattern.match(path.name)
-        if match:
-            highest = max(highest, int(match.group(1)))
-    return attachment_dir / f"{session_name}-generated-{highest + 1:02d}{ext}"
+    candidates = parsed.get("candidates", [])
+    for c_index, candidate in enumerate(candidates, start=1):
+        parts = candidate.get("content", {}).get("parts", [])
+        for p_index, part in enumerate(parts, start=1):
+            inline = part.get("inline_data") or part.get("inlineData")
+            if not inline:
+                continue
+            mime_type = inline.get("mime_type") or inline.get("mimeType") or "application/octet-stream"
+            data = inline.get("data", "")
+            if not data:
+                continue
+            ext = mime_extension(mime_type)
+            filename = f"{session_name}-response-{c_index:02d}-{p_index:02d}{ext}"
+            path = attachment_dir / filename
+            try:
+                path.write_bytes(base64.b64decode(data))
+                notices.append(f"[response attachment saved]\nfile: {filename}\nlocation: {attachment_dir}")
+            except Exception as exc:
+                notices.append(f"[response attachment save failed: {exc}]")
+    return "\n".join(notices)
 
 
-def save_generated_inline_data(data: str, mime_type: str, attachment_dir: Path, session_name: str) -> Path:
-    raw = base64.b64decode(data)
-    path = next_generated_attachment_path(attachment_dir, session_name, extension_for_mime(mime_type))
-    path.write_bytes(raw)
-    return path
-
-
-def attachment_to_part(attachment: PendingAttachment) -> dict:
-    if attachment.mode == "text":
-        content = attachment.path.read_text(encoding="utf-8", errors="replace")
-        return {
-            "text": (
-                f"\n[Attached file: {attachment.path.name}]\n"
-                f"Path: {attachment.path}\n"
-                f"--- BEGIN ATTACHED TEXT ---\n{content}\n--- END ATTACHED TEXT ---\n"
-            )
-        }
-
-    data = base64.b64encode(attachment.path.read_bytes()).decode("ascii")
-    return {
-        "inlineData": {
-            "mimeType": attachment.mime_type,
-            "data": data,
-        }
-    }
-
-
-def build_generate_payload(prompt_text: str, attachments: List[PendingAttachment]) -> dict:
-    parts = [{"text": prompt_text}]
-    for attachment in attachments:
-        parts.append(attachment_to_part(attachment))
-    return {"contents": [{"parts": parts}]}
+def parse_generated_text_and_files(body: str, attachment_dir: Path, session_name: str) -> str:
+    parsed = json.loads(body)
+    text_chunks: List[str] = []
+    for candidate in parsed.get("candidates", []):
+        for part in candidate.get("content", {}).get("parts", []):
+            if "text" in part:
+                text_chunks.append(part.get("text", ""))
+    text = "\n".join(chunk for chunk in text_chunks if chunk)
+    notices = save_inline_response_parts(parsed, attachment_dir, session_name)
+    if notices:
+        text = text + ("\n\n" if text else "") + notices
+    return text
 
 
 def generate_with_model(
     cfg: Config,
     model_id: str,
     prompt_text: str,
+    session_name: str,
+    attachment_dir: Path,
     attachments: Optional[List[PendingAttachment]] = None,
     timeout: int = 120,
-    attachment_dir: Optional[Path] = None,
-    session_name: str = "session",
 ) -> Tuple[bool, str]:
     if not cfg.api_key:
         return False, "No Gemini API key loaded. Press F3 to paste an API key."
 
-    attachments = attachments or []
-    attachment_dir = attachment_dir or cfg.effective_attachment_dir
-
-    try:
-        payload = build_generate_payload(prompt_text, attachments)
-    except Exception as exc:
-        return False, f"Attachment payload error: {exc}"
-
+    payload = {"contents": [{"parts": build_gemini_parts(prompt_text, attachments or [])}]}
     data = json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(
         model_endpoint(cfg, model_id),
@@ -415,29 +380,17 @@ def generate_with_model(
         return False, f"Gemini request error: {exc}"
 
     try:
-        result = parse_generated_response(body, attachment_dir, session_name)
+        text = parse_generated_text_and_files(body, attachment_dir, session_name)
     except Exception as exc:
         return False, f"Gemini response parse error: {exc}; raw response: {body[:1000]}"
 
-    return True, result.text
+    if not text.strip():
+        return False, "Gemini returned an empty text response"
+    return True, text
 
 
-def call_gemini(
-    cfg: Config,
-    prompt_text: str,
-    attachments: List[PendingAttachment],
-    attachment_dir: Path,
-    session_name: str,
-) -> str:
-    ok, text = generate_with_model(
-        cfg,
-        cfg.effective_model,
-        prompt_text,
-        attachments=attachments,
-        timeout=120,
-        attachment_dir=attachment_dir,
-        session_name=session_name,
-    )
+def call_gemini(cfg: Config, prompt_text: str, session_name: str, attachment_dir: Path, attachments: List[PendingAttachment]) -> str:
+    ok, text = generate_with_model(cfg, cfg.effective_model, prompt_text, session_name, attachment_dir, attachments, timeout=120)
     if ok:
         return text
     return f"({text})"
@@ -454,7 +407,6 @@ def fetch_models(cfg: Config) -> Tuple[List[ModelInfo], Optional[str]]:
         query = {"key": cfg.api_key}
         if page_token:
             query["pageToken"] = page_token
-
         url = "https://generativelanguage.googleapis.com/v1beta/models?" + urllib.parse.urlencode(query)
 
         try:
@@ -477,12 +429,10 @@ def fetch_models(cfg: Config) -> Tuple[List[ModelInfo], Optional[str]]:
             methods = list(raw.get("supportedGenerationMethods", []))
             if "generateContent" not in methods:
                 continue
-
             api_name = raw.get("name", "")
             model_id = normalize_model_id(api_name)
             if not model_id:
                 continue
-
             models.append(
                 ModelInfo(
                     model_id=model_id,
@@ -503,7 +453,6 @@ def fetch_models(cfg: Config) -> Tuple[List[ModelInfo], Optional[str]]:
     for model in models:
         if model.model_id not in unique:
             unique[model.model_id] = model
-
     return list(unique.values()), None
 
 
@@ -512,29 +461,28 @@ def print_models(cfg: Config) -> int:
     if error:
         print(f"ERROR: {error}", file=sys.stderr)
         return 1
-
     for model in models:
-        name = model.display_name or model.model_id
-        print(f"{model.model_id}\t{name}")
+        print(f"{model.model_id}\t{model.display_name or model.model_id}")
     return 0
 
 
-def print_test_model(cfg: Config, model_id: str) -> int:
-    ok, text = generate_with_model(cfg, model_id, cfg.model_test_prompt, timeout=60)
-    if not ok:
-        print(f"ERROR: {text}", file=sys.stderr)
-        return 1
+def print_model_test(cfg: Config, model_id: str) -> int:
+    attachment_dir = cfg.effective_attachment_dir
+    ok, text = generate_with_model(cfg, model_id, cfg.model_test_prompt, "model-test", attachment_dir, [], timeout=60)
+    print("MODEL TEST PROMPT:")
+    print(cfg.model_test_prompt)
+    print("\nMODEL RESPONSE:")
     print(text)
-    return 0
+    return 0 if ok else 1
 
 
 # ---------------------------------------------------------------------------
-# Session log parsing and writing
+# Session logs and context snapshots
 # ---------------------------------------------------------------------------
 
 
 ENTRY_RE = re.compile(r"^\[(\d{2}:\d{2}:\d{2})\] ([^:]+): (.*)$")
-CONTEXT_PREFIX = "CONTEXT_SNAPSHOT "
+SNAPSHOT_PREFIX = "CONTEXT_SNAPSHOT_JSON "
 
 
 @dataclass
@@ -544,6 +492,10 @@ class LogEntry:
     text: str
 
 
+def now_time() -> str:
+    return datetime.now().strftime("%H:%M:%S")
+
+
 def append_log(path: Path, speaker: str, text: str, timestamp: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as fh:
@@ -551,8 +503,12 @@ def append_log(path: Path, speaker: str, text: str, timestamp: str) -> None:
 
 
 def append_context_snapshot(path: Path, context_buffer: List[str]) -> None:
-    payload = json.dumps(context_buffer, ensure_ascii=False)
-    append_log(path, "system", CONTEXT_PREFIX + payload, now_time())
+    snapshot = SNAPSHOT_PREFIX + json.dumps(context_buffer, ensure_ascii=False)
+    append_log(path, "system", snapshot, now_time())
+
+
+def is_snapshot_entry(entry: LogEntry) -> bool:
+    return entry.speaker == "system" and entry.text.startswith(SNAPSHOT_PREFIX)
 
 
 def load_log_entries(path: Path) -> List[LogEntry]:
@@ -586,14 +542,15 @@ def load_log_entries(path: Path) -> List[LogEntry]:
 
 def latest_context_snapshot(entries: List[LogEntry]) -> Optional[List[str]]:
     for entry in reversed(entries):
-        if entry.speaker == "system" and entry.text.startswith(CONTEXT_PREFIX):
-            raw = entry.text[len(CONTEXT_PREFIX) :]
-            try:
-                parsed = json.loads(raw)
-            except Exception:
-                continue
-            if isinstance(parsed, list) and all(isinstance(item, str) for item in parsed):
-                return parsed
+        if not is_snapshot_entry(entry):
+            continue
+        raw = entry.text[len(SNAPSHOT_PREFIX):]
+        try:
+            value = json.loads(raw)
+        except Exception:
+            continue
+        if isinstance(value, list) and all(isinstance(item, str) for item in value):
+            return value
     return None
 
 
@@ -603,25 +560,11 @@ def latest_context_snapshot(entries: List[LogEntry]) -> Optional[List[str]]:
 
 
 EXT_MAP = {
-    "bash": ".sh",
-    "sh": ".sh",
-    "shell": ".sh",
-    "python": ".py",
-    "py": ".py",
-    "json": ".json",
-    "yaml": ".yml",
-    "yml": ".yml",
-    "javascript": ".js",
-    "js": ".js",
-    "html": ".html",
-    "css": ".css",
-    "sql": ".sql",
-    "c": ".c",
-    "cpp": ".cpp",
-    "c++": ".cpp",
-    "text": ".txt",
+    "bash": ".sh", "sh": ".sh", "shell": ".sh", "python": ".py", "py": ".py",
+    "json": ".json", "yaml": ".yml", "yml": ".yml", "javascript": ".js", "js": ".js",
+    "html": ".html", "css": ".css", "sql": ".sql", "c": ".c", "cpp": ".cpp",
+    "c++": ".cpp", "text": ".txt",
 }
-
 FENCE_RE = re.compile(r"```([A-Za-z0-9_+.#-]*)[ \t]*\n(.*?)```", re.DOTALL)
 
 
@@ -633,9 +576,7 @@ def safe_attachment_tag(lang: str) -> str:
 
 
 def next_attachment_number(attachment_dir: Path, session_name: str, lang: str, ext: str) -> int:
-    pattern = re.compile(
-        rf"^{re.escape(session_name)}-{re.escape(lang)}-(\d{{2,}}){re.escape(ext)}$"
-    )
+    pattern = re.compile(rf"^{re.escape(session_name)}-{re.escape(lang)}-(\d{{2,}}){re.escape(ext)}$")
     highest = 0
     for path in attachment_dir.glob(f"{session_name}-{lang}-*{ext}"):
         match = pattern.match(path.name)
@@ -644,7 +585,7 @@ def next_attachment_number(attachment_dir: Path, session_name: str, lang: str, e
     return highest + 1
 
 
-def extract_attachments(text: str, attachment_dir: Path, session_name: str) -> str:
+def extract_code_attachments(text: str, attachment_dir: Path, session_name: str) -> str:
     attachment_dir.mkdir(parents=True, exist_ok=True)
 
     def replacement(match: re.Match[str]) -> str:
@@ -655,22 +596,14 @@ def extract_attachments(text: str, attachment_dir: Path, session_name: str) -> s
         number = next_attachment_number(attachment_dir, session_name, lang, ext)
         filename = f"{session_name}-{lang}-{number:02d}{ext}"
         path = attachment_dir / filename
-
-        with path.open("w", encoding="utf-8") as fh:
-            fh.write(content)
-
-        return (
-            "\n"
-            "[attachment saved]\n"
-            f"file: {filename}\n"
-            f"location: {attachment_dir}\n"
-        )
+        path.write_text(content, encoding="utf-8")
+        return f"\n[attachment saved]\nfile: {filename}\nlocation: {attachment_dir}\n"
 
     return FENCE_RE.sub(replacement, text)
 
 
 # ---------------------------------------------------------------------------
-# Text wrapping helpers
+# Text wrapping and transcript items
 # ---------------------------------------------------------------------------
 
 
@@ -692,10 +625,6 @@ def wrap_for_width(text: str, width: int) -> List[str]:
                 )
             )
     return result or [""]
-
-
-def now_time() -> str:
-    return datetime.now().strftime("%H:%M:%S")
 
 
 @dataclass
@@ -720,7 +649,7 @@ class InputSegment:
 
 class GeminiCursesApp:
     INPUT_HEIGHT = 6
-    TRANSCRIPT_REPLAY_LIMIT = 60
+    TRANSCRIPT_REPLAY_LIMIT = 80
 
     def __init__(self, cfg: Config, session_name: str, session_path: Path):
         self.cfg = cfg
@@ -732,55 +661,64 @@ class GeminiCursesApp:
         self.context_buffer: List[str] = []
         self.transcript: List[TranscriptItem] = []
         self.transcript_scroll = 0
+        self.pending_attachments: List[PendingAttachment] = []
 
         self.input_lines: List[str] = [""]
         self.cursor_row = 0
         self.cursor_col = 0
         self.input_scroll = 0
 
-        self.pending_attachments: List[PendingAttachment] = []
         self.layout: dict[str, int] = {}
         self.last_input_segments: List[InputSegment] = []
 
         self.status = self.default_status()
         self.should_quit = False
+        self.startup_notice_active = False
+        self.first_user_message_sent = False
 
     def default_status(self) -> str:
-        return "F1=help | F2=models | F3=key | F4=sessions | F5=options | F6=memory | F7=files | F8=editor | F9=credits"
+        return "F1 Menu | Ctrl+G Send | F10 Quit"
 
-    # ---------------------------------------------------------------------
-    # Memory and resume model
-    # ---------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Context memory
+    # ------------------------------------------------------------------
 
     def load_session_into_ui(self) -> None:
         entries = load_log_entries(self.session_path)
-        self.transcript = []
-        self.context_buffer = []
         if not entries:
+            self.maybe_show_startup_notice()
             return
 
-        for entry in entries[-self.TRANSCRIPT_REPLAY_LIMIT :]:
-            if entry.speaker == "system" and entry.text.startswith(CONTEXT_PREFIX):
+        for entry in entries[-self.TRANSCRIPT_REPLAY_LIMIT:]:
+            if is_snapshot_entry(entry):
                 continue
             self.transcript.append(TranscriptItem(entry.speaker, entry.text, entry.timestamp))
 
         snapshot = latest_context_snapshot(entries)
         if snapshot is not None:
-            self.context_buffer = snapshot[-self.cfg.context_turns * 2 :]
+            self.context_buffer = snapshot
         else:
             max_entries = self.cfg.context_turns * 2
-            normal_entries = [
-                entry for entry in entries
-                if not (entry.speaker == "system" and entry.text.startswith(CONTEXT_PREFIX))
-            ]
-            for entry in normal_entries[-max_entries:]:
+            for entry in entries[-max_entries:]:
+                if is_snapshot_entry(entry) or entry.speaker == "system":
+                    continue
                 if entry.speaker == "Gemini":
                     self.context_buffer.append("Assistant: " + entry.text)
-                elif entry.speaker != "system":
+                else:
                     self.context_buffer.append("User: " + entry.text)
 
         self.trim_context_buffer()
         self.status = f"loaded session: {self.session_name}"
+
+    def reset_to_session(self, session_name: str, session_path: Path) -> None:
+        self.session_name = session_name
+        self.session_path = session_path
+        self.transcript = []
+        self.context_buffer = []
+        self.transcript_scroll = 0
+        self.startup_notice_active = False
+        self.first_user_message_sent = False
+        self.load_session_into_ui()
 
     def trim_context_buffer(self) -> None:
         max_entries = self.cfg.context_turns * 2
@@ -793,9 +731,39 @@ class GeminiCursesApp:
     def save_context_snapshot(self) -> None:
         append_context_snapshot(self.session_path, self.context_buffer)
 
-    # ---------------------------------------------------------------------
-    # Safe curses drawing
-    # ---------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Curses drawing and style helpers
+    # ------------------------------------------------------------------
+
+    def dim_attr(self) -> int:
+        return 0 if self.cfg.monochrome else curses.A_DIM
+
+    def reverse_attr(self) -> int:
+        return curses.A_REVERSE
+
+    def transcript_attr_for(self, speaker: str) -> int:
+        if self.cfg.monochrome:
+            return 0
+        if speaker == "Gemini":
+            return 0
+        if speaker == self.username or speaker == "remfan1994" or speaker == "system":
+            return self.dim_attr()
+        return 0
+
+    def maybe_show_startup_notice(self) -> None:
+        if not self.cfg.startup_notice:
+            return
+        self.startup_notice_active = True
+        self.transcript.append(TranscriptItem("remfan1994", PROJECT_NOTICE, now_time()))
+
+    def remove_startup_notice(self) -> None:
+        if not self.startup_notice_active:
+            return
+        self.transcript = [
+            item for item in self.transcript
+            if not (item.speaker == "remfan1994" and item.text == PROJECT_NOTICE)
+        ]
+        self.startup_notice_active = False
 
     def safe_addstr(self, y: int, x: int, text: str, max_width: Optional[int] = None, attr: int = 0) -> None:
         height, width = self.stdscr.getmaxyx()
@@ -811,13 +779,15 @@ class GeminiCursesApp:
         except curses.error:
             pass
 
-    def transcript_display_lines(self, width: int) -> List[str]:
-        lines: List[str] = []
+    def transcript_display_lines(self, width: int) -> List[Tuple[str, int]]:
+        lines: List[Tuple[str, int]] = []
         for item in self.transcript:
-            prefix = f"[{item.timestamp}] {item.speaker}: "
-            wrapped = wrap_for_width(prefix + item.text, width)
-            lines.extend(wrapped)
-            lines.append("")
+            attr = self.transcript_attr_for(item.speaker)
+            attr_prefix = "[system] " if item.speaker == "system" else ""
+            prefix = f"[{item.timestamp}] {item.speaker}: {attr_prefix}"
+            for wrapped in wrap_for_width(prefix + item.text, width):
+                lines.append((wrapped, attr))
+            lines.append(("", 0))
         return lines
 
     def model_label(self) -> str:
@@ -827,10 +797,10 @@ class GeminiCursesApp:
 
     def draw_header(self, width: int) -> None:
         key_state = "key:loaded" if self.cfg.api_key else "key:missing"
-        attach_state = f"attachments:{len(self.pending_attachments)}"
-        header = f"{PROGRAM} | session: {self.session_name} | model: {self.model_label()} | {key_state} | {attach_state}"
-        self.safe_addstr(0, 0, header, width, curses.A_REVERSE)
-        self.safe_addstr(1, 0, "_" * width, width, curses.A_DIM)
+        attach_state = f" files:{len(self.pending_attachments)}" if self.pending_attachments else ""
+        header = f"{PROGRAM} | {self.session_name} | {self.model_label()} | {key_state}{attach_state}"
+        self.safe_addstr(0, 0, header, width, self.reverse_attr())
+        self.safe_addstr(1, 0, "_" * width, width, self.dim_attr())
 
     def draw_transcript(self, start_y: int, height: int, width: int) -> None:
         lines = self.transcript_display_lines(width)
@@ -838,11 +808,10 @@ class GeminiCursesApp:
         self.transcript_scroll = min(self.transcript_scroll, max_scroll)
         start = max(0, len(lines) - height - self.transcript_scroll)
         visible = lines[start : start + height]
-
         for offset in range(height):
-            y = start_y + offset
             if offset < len(visible):
-                self.safe_addstr(y, 0, visible[offset], width)
+                text, attr = visible[offset]
+                self.safe_addstr(start_y + offset, 0, text, width, attr)
 
     def input_segments(self, width: int) -> Tuple[List[InputSegment], int, int]:
         marker_width = 2
@@ -852,21 +821,16 @@ class GeminiCursesApp:
         cursor_x = marker_width
 
         for logical_row, line in enumerate(self.input_lines):
-            cursor_segment = 0
-            if logical_row == self.cursor_row:
-                cursor_segment = self.cursor_col // available
-
+            cursor_segment = self.cursor_col // available if logical_row == self.cursor_row else 0
             segment_count = max(1, (len(line) + available - 1) // available)
             if logical_row == self.cursor_row:
                 segment_count = max(segment_count, cursor_segment + 1)
 
             for segment in range(segment_count):
                 start = segment * available
-                end = start + available
                 marker = "> " if logical_row == 0 and segment == 0 else "  "
-                chunk = line[start:end]
+                chunk = line[start : start + available]
                 segments.append(InputSegment(marker + chunk, logical_row, start, available))
-
                 if logical_row == self.cursor_row and segment == cursor_segment:
                     cursor_visual_index = len(segments) - 1
                     cursor_x = marker_width + (self.cursor_col % available)
@@ -874,26 +838,34 @@ class GeminiCursesApp:
         return segments or [InputSegment("> ", 0, 0, max(1, width - 2))], cursor_visual_index, cursor_x
 
     def draw_input(self, label_y: int, input_y: int, width: int) -> None:
-        label = "INPUT: Enter=newline | Ctrl+G=send | F1-F9 menus | click places cursor"
-        self.safe_addstr(label_y, 0, "_" * width, width, curses.A_DIM)
-        self.safe_addstr(label_y, 0, label, width, curses.A_DIM)
+        label = "INPUT: Enter=newline | Ctrl+G send | F1 menu | F8 editor"
+        self.safe_addstr(label_y, 0, "_" * width, width, self.dim_attr())
+        self.safe_addstr(label_y, 0, label, width, self.dim_attr())
 
         segments, cursor_visual_index, cursor_x = self.input_segments(width)
         self.last_input_segments = segments
-
         if cursor_visual_index < self.input_scroll:
             self.input_scroll = cursor_visual_index
         elif cursor_visual_index >= self.input_scroll + self.INPUT_HEIGHT:
             self.input_scroll = cursor_visual_index - self.INPUT_HEIGHT + 1
+        self.input_scroll = max(0, min(self.input_scroll, max(0, len(segments) - self.INPUT_HEIGHT)))
 
-        max_scroll = max(0, len(segments) - self.INPUT_HEIGHT)
-        self.input_scroll = max(0, min(self.input_scroll, max_scroll))
+        if self.current_input() == "":
+            placeholder = "> " + self.cfg.input_placeholder
+            self.safe_addstr(input_y, 0, placeholder, width, self.dim_attr())
+            for offset in range(1, self.INPUT_HEIGHT):
+                self.safe_addstr(input_y + offset, 0, "", width)
+            try:
+                curses.curs_set(1)
+                self.stdscr.move(input_y, 2)
+            except curses.error:
+                pass
+            return
 
         visible = segments[self.input_scroll : self.input_scroll + self.INPUT_HEIGHT]
         for offset in range(self.INPUT_HEIGHT):
-            y = input_y + offset
             text = visible[offset].display if offset < len(visible) else ""
-            self.safe_addstr(y, 0, text, width)
+            self.safe_addstr(input_y + offset, 0, text, width)
 
         cursor_screen_y = input_y + cursor_visual_index - self.input_scroll
         try:
@@ -903,17 +875,16 @@ class GeminiCursesApp:
             pass
 
     def draw_status(self, y: int, width: int) -> None:
-        self.safe_addstr(y, 0, "_" * width, width, curses.A_DIM)
-        self.safe_addstr(y, 0, self.status, width, curses.A_REVERSE)
+        self.safe_addstr(y, 0, "_" * width, width, self.dim_attr())
+        self.safe_addstr(y, 0, self.status, width, self.reverse_attr())
 
     def draw(self) -> None:
         self.stdscr.erase()
         height, width = self.stdscr.getmaxyx()
-
         min_height = self.INPUT_HEIGHT + 6
         if height < min_height or width < 40:
             self.layout = {}
-            self.safe_addstr(0, 0, "terminal too small", width)
+            self.safe_addstr(0, 0, "terminal too small", width, self.reverse_attr())
             self.stdscr.refresh()
             return
 
@@ -925,7 +896,6 @@ class GeminiCursesApp:
         input_label_y = transcript_y + transcript_h
         input_y = input_label_y + input_label_h
         status_y = height - 1
-
         self.layout = {
             "width": width,
             "height": height,
@@ -936,16 +906,15 @@ class GeminiCursesApp:
             "input_h": self.INPUT_HEIGHT,
             "status_y": status_y,
         }
-
         self.draw_header(width)
         self.draw_transcript(transcript_y, transcript_h, width)
         self.draw_input(input_label_y, input_y, width)
         self.draw_status(status_y, width)
         self.stdscr.refresh()
 
-    # ---------------------------------------------------------------------
+    # ------------------------------------------------------------------
     # Mouse handling
-    # ---------------------------------------------------------------------
+    # ------------------------------------------------------------------
 
     def mouse_wheel_delta(self, state: int) -> int:
         if state & getattr(curses, "BUTTON4_PRESSED", 0):
@@ -971,7 +940,6 @@ class GeminiCursesApp:
             _mouse_id, x, y, _z, state = curses.getmouse()
         except curses.error:
             return
-
         delta = self.mouse_wheel_delta(state)
         if delta:
             if delta > 0:
@@ -980,63 +948,89 @@ class GeminiCursesApp:
                 self.transcript_scroll = max(0, self.transcript_scroll - MOUSE_SCROLL_LINES)
             self.status = "mousewheel: transcript scroll"
             return
-
         if not self.layout:
             return
-
         if self.mouse_button1(state):
             input_y = self.layout.get("input_y", -1)
             input_h = self.layout.get("input_h", 0)
             if input_y <= y < input_y + input_h:
                 self.place_cursor_from_mouse(x, y - input_y)
                 self.status = "mouse: input cursor placed"
-                return
 
     def place_cursor_from_mouse(self, x: int, visible_row: int) -> None:
         index = self.input_scroll + visible_row
         if index < 0 or index >= len(self.last_input_segments):
             return
-
         segment = self.last_input_segments[index]
         line = self.input_lines[segment.logical_row]
         clicked_col = max(0, x - 2)
         logical_col = min(len(line), segment.start + clicked_col)
-
         self.cursor_row = segment.logical_row
         self.cursor_col = logical_col
 
-    # ---------------------------------------------------------------------
-    # Modal helpers
-    # ---------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Generic modals and external editor
+    # ------------------------------------------------------------------
 
     def show_message(self, title: str, lines: List[str]) -> None:
+        """Show a resolution-safe full-screen scrollable page.
+
+        The earlier modal version could clip long text on small terminals.
+        This page owns the whole screen, wraps all lines, and supports
+        PgUp/PgDn, mousewheel, q/Esc, and any key to leave when content fits.
+        """
+        scroll = 0
         while True:
             self.stdscr.erase()
             height, width = self.stdscr.getmaxyx()
-            box_w = min(width - 4, 78)
-            box_h = min(height - 4, max(8, len(lines) + 5))
-            top = max(0, (height - box_h) // 2)
-            left = max(0, (width - box_w) // 2)
+            body_h = max(1, height - 4)
+            wrapped: List[str] = []
+            for line in lines:
+                if line == "":
+                    wrapped.append("")
+                else:
+                    wrapped.extend(wrap_for_width(line, max(10, width)))
 
-            self.safe_addstr(top, left, "+" + "-" * (box_w - 2) + "+", attr=curses.A_DIM)
-            self.safe_addstr(top + 1, left, "|" + title.center(box_w - 2) + "|", attr=curses.A_REVERSE)
-            self.safe_addstr(top + 2, left, "+" + "-" * (box_w - 2) + "+", attr=curses.A_DIM)
+            max_scroll = max(0, len(wrapped) - body_h)
+            scroll = max(0, min(scroll, max_scroll))
 
-            y = top + 3
-            for raw in lines:
-                for wrapped in wrap_for_width(raw, box_w - 4):
-                    if y >= top + box_h - 2:
-                        break
-                    self.safe_addstr(y, left + 2, wrapped, box_w - 4)
-                    y += 1
-                if y >= top + box_h - 2:
-                    break
+            self.safe_addstr(0, 0, title, width, self.reverse_attr())
+            self.safe_addstr(1, 0, "_" * width, width, self.dim_attr())
 
-            self.safe_addstr(top + box_h - 2, left + 2, "Press any key or click to continue", box_w - 4, curses.A_DIM)
-            self.safe_addstr(top + box_h - 1, left, "+" + "-" * (box_w - 2) + "+", attr=curses.A_DIM)
+            visible = wrapped[scroll:scroll + body_h]
+            for idx, line in enumerate(visible):
+                self.safe_addstr(2 + idx, 0, line, width)
+
+            footer = "q/Esc=return | PgUp/PgDn/wheel=scroll"
+            if max_scroll == 0:
+                footer = "q/Esc/any key=return"
+            self.safe_addstr(height - 1, 0, footer, width, self.reverse_attr())
             self.stdscr.refresh()
-            self.stdscr.getch()
-            return
+
+            ch = self.stdscr.getch()
+            if ch == curses.KEY_MOUSE:
+                try:
+                    _mid, _x, _y, _z, state = curses.getmouse()
+                except curses.error:
+                    continue
+                delta = self.mouse_wheel_delta(state)
+                if delta > 0:
+                    scroll = max(0, scroll - MOUSE_SCROLL_LINES)
+                    continue
+                if delta < 0:
+                    scroll = min(max_scroll, scroll + MOUSE_SCROLL_LINES)
+                    continue
+                return
+            if ch in (27, ord("q"), ord("Q")):
+                return
+            if ch == curses.KEY_PPAGE:
+                scroll = max(0, scroll - body_h)
+                continue
+            if ch == curses.KEY_NPAGE:
+                scroll = min(max_scroll, scroll + body_h)
+                continue
+            if max_scroll == 0:
+                return
 
     def ask_yes_no(self, title: str, message: str, default: bool = False) -> bool:
         while True:
@@ -1046,31 +1040,25 @@ class GeminiCursesApp:
             box_h = 10
             top = max(0, (height - box_h) // 2)
             left = max(0, (width - box_w) // 2)
-
-            self.safe_addstr(top, left, "+" + "-" * (box_w - 2) + "+", attr=curses.A_DIM)
-            self.safe_addstr(top + 1, left, "|" + title.center(box_w - 2) + "|", attr=curses.A_REVERSE)
-            self.safe_addstr(top + 2, left, "+" + "-" * (box_w - 2) + "+", attr=curses.A_DIM)
-
+            self.safe_addstr(top, left, "+" + "-" * (box_w - 2) + "+", attr=self.reverse_attr())
+            self.safe_addstr(top + 1, left, "|" + title.center(box_w - 2) + "|", attr=self.reverse_attr())
+            self.safe_addstr(top + 2, left, "+" + "-" * (box_w - 2) + "+", attr=self.reverse_attr())
             y = top + 3
             for line in wrap_for_width(message, box_w - 4)[:3]:
                 self.safe_addstr(y, left + 2, line, box_w - 4)
                 y += 1
-
             default_label = "yes" if default else "no"
-            prompt = f"Y/N? Enter={default_label} | Esc=no | click left half=yes, right half=no"
-            self.safe_addstr(top + box_h - 2, left + 2, prompt, box_w - 4, curses.A_DIM)
-            self.safe_addstr(top + box_h - 1, left, "+" + "-" * (box_w - 2) + "+", attr=curses.A_DIM)
+            self.safe_addstr(top + box_h - 2, left + 2, f"Y/N? Enter={default_label} | Esc=no", box_w - 4, self.dim_attr())
+            self.safe_addstr(top + box_h - 1, left, "+" + "-" * (box_w - 2) + "+", attr=self.reverse_attr())
             self.stdscr.refresh()
-
             ch = self.stdscr.getch()
             if ch == curses.KEY_MOUSE:
                 try:
-                    _mouse_id, x, y_mouse, _z, state = curses.getmouse()
+                    _mid, x, y_mouse, _z, state = curses.getmouse()
                 except curses.error:
                     continue
                 if self.mouse_button1(state) and top <= y_mouse <= top + box_h:
                     return x < left + (box_w // 2)
-                continue
             if ch in (ord("y"), ord("Y")):
                 return True
             if ch in (ord("n"), ord("N"), 27):
@@ -1088,27 +1076,19 @@ class GeminiCursesApp:
             box_h = 11
             top = max(0, (height - box_h) // 2)
             left = max(0, (width - box_w) // 2)
+            shown_value = ("*" * max(0, len(value) - 4) + value[-4:]) if secret else value
             field_w = box_w - 6
-
-            visible_value = "*" * max(0, len(value) - 4) + value[-4:] if secret else value
-            left_cut = max(0, cursor - field_w + 1)
-            shown = visible_value[left_cut : left_cut + field_w]
-
-            self.safe_addstr(top, left, "+" + "-" * (box_w - 2) + "+", attr=curses.A_DIM)
-            self.safe_addstr(top + 1, left, "|" + title.center(box_w - 2) + "|", attr=curses.A_REVERSE)
-            self.safe_addstr(top + 2, left, "+" + "-" * (box_w - 2) + "+", attr=curses.A_DIM)
+            shown = shown_value[max(0, cursor - field_w + 1):][:field_w]
+            self.safe_addstr(top, left, "+" + "-" * (box_w - 2) + "+", attr=self.reverse_attr())
+            self.safe_addstr(top + 1, left, "|" + title.center(box_w - 2) + "|", attr=self.reverse_attr())
+            self.safe_addstr(top + 2, left, "+" + "-" * (box_w - 2) + "+", attr=self.reverse_attr())
             for idx, line in enumerate(wrap_for_width(prompt, box_w - 4)[:3]):
                 self.safe_addstr(top + 3 + idx, left + 2, line, box_w - 4)
-            self.safe_addstr(top + 7, left + 2, " " * field_w, field_w, curses.A_REVERSE)
-            self.safe_addstr(top + 7, left + 2, shown, field_w, curses.A_REVERSE)
-            self.safe_addstr(top + 9, left + 2, "Enter=accept | Esc=cancel | Backspace=edit", box_w - 4, curses.A_DIM)
-            self.safe_addstr(top + 10, left, "+" + "-" * (box_w - 2) + "+", attr=curses.A_DIM)
-            try:
-                self.stdscr.move(top + 7, left + 2 + min(cursor - left_cut, field_w - 1))
-            except curses.error:
-                pass
+            self.safe_addstr(top + 7, left + 2, " " * field_w, field_w, self.reverse_attr())
+            self.safe_addstr(top + 7, left + 2, shown, field_w, self.reverse_attr())
+            self.safe_addstr(top + 9, left + 2, "Enter=accept | Esc=cancel | Backspace=edit", box_w - 4, self.dim_attr())
+            self.safe_addstr(top + 10, left, "+" + "-" * (box_w - 2) + "+", attr=self.reverse_attr())
             self.stdscr.refresh()
-
             ch = self.stdscr.getch()
             if ch in (10, 13, curses.KEY_ENTER):
                 return value.strip()
@@ -1120,7 +1100,7 @@ class GeminiCursesApp:
                     cursor -= 1
             elif ch == curses.KEY_DC:
                 if cursor < len(value):
-                    value = value[:cursor] + value[cursor + 1 :]
+                    value = value[:cursor] + value[cursor + 1:]
             elif ch == curses.KEY_LEFT:
                 cursor = max(0, cursor - 1)
             elif ch == curses.KEY_RIGHT:
@@ -1133,168 +1113,115 @@ class GeminiCursesApp:
                 value = value[:cursor] + chr(ch) + value[cursor:]
                 cursor += 1
 
-    def select_menu(self, title: str, rows: List[str], footer: str = "Enter=select | Esc=cancel") -> Optional[int]:
-        if not rows:
-            self.show_message(title, ["No entries."])
+    def run_external_editor(self, initial_text: str, suffix: str = ".txt") -> Optional[str]:
+        editor = self.cfg.effective_editor
+        fd, path_str = tempfile.mkstemp(prefix="gemini-curses-", suffix=suffix)
+        path = Path(path_str)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(initial_text)
+            curses.def_prog_mode()
+            curses.endwin()
+            try:
+                subprocess.call(shlex.split(editor) + [str(path)])
+            finally:
+                curses.reset_prog_mode()
+                self.stdscr.keypad(True)
+            return path.read_text(encoding="utf-8", errors="replace")
+        except Exception as exc:
+            self.status = f"editor error: {exc}"
             return None
+        finally:
+            try:
+                path.unlink()
+            except OSError:
+                pass
 
-        selected = 0
-        top_index = 0
-        while True:
-            self.stdscr.erase()
-            height, width = self.stdscr.getmaxyx()
-            visible_h = max(1, height - 5)
-            self.safe_addstr(0, 0, title, width, curses.A_REVERSE)
-            self.safe_addstr(1, 0, footer, width, curses.A_DIM)
-            self.safe_addstr(2, 0, "_" * width, width, curses.A_DIM)
+    # ------------------------------------------------------------------
+    # High-level feature screens
+    # ------------------------------------------------------------------
 
-            if selected < top_index:
-                top_index = selected
-            elif selected >= top_index + visible_h:
-                top_index = selected - visible_h + 1
+    def open_help(self) -> None:
+        self.show_message("F1 HELP / COMMAND MENU", [
+            "F1  Help / command menu",
+            "F2  Models: list, inspect, test, activate, save",
+            "F3  API key manager",
+            "F4  Sessions: browse, open, create, rename",
+            "F5  Options: edit config-backed settings",
+            "F6  Memory: view, edit, clear, rebuild",
+            "F7  Files: attach local files, browse saved attachments",
+            "F8  External editor for current prompt",
+            "F9  Credits / about",
+            "F10 or Ctrl+Q  Quit",
+            "",
+            "Ctrl+G or F5 sends the current message. Enter inserts a newline.",
+            "Mousewheel scrolls transcript and lists. Left-click input places cursor.",
+            "The compact footer intentionally shows only the essential commands on low-resolution terminals.",
+        ])
 
-            for row in range(visible_h):
-                idx = top_index + row
-                if idx >= len(rows):
-                    break
-                attr = curses.A_REVERSE if idx == selected else 0
-                self.safe_addstr(3 + row, 0, rows[idx], width, attr)
+    def open_credits(self) -> None:
+        self.show_message("CREDITS", [
+            "gemini-terminal-tools",
+            f"GitHub: {self.cfg.github_url}",
+            "",
+            "Project lead notice is displayed inside the blank chat window on new sessions and disappears when the first user message is sent.",
+            "",
+            PROJECT_NOTICE,
+        ])
 
-            self.safe_addstr(height - 1, 0, f"{selected + 1}/{len(rows)}", width, curses.A_DIM)
-            self.stdscr.refresh()
-            ch = self.stdscr.getch()
-            if ch in (27, ord("q"), ord("Q")):
-                return None
-            if ch in (10, 13, curses.KEY_ENTER):
-                return selected
-            if ch == curses.KEY_MOUSE:
-                try:
-                    _mouse_id, _x, y, _z, state = curses.getmouse()
-                except curses.error:
-                    continue
-                delta = self.mouse_wheel_delta(state)
-                if delta > 0:
-                    selected = max(0, selected - MOUSE_SCROLL_LINES)
-                elif delta < 0:
-                    selected = min(len(rows) - 1, selected + MOUSE_SCROLL_LINES)
-                elif self.mouse_button1(state) and 3 <= y < 3 + visible_h:
-                    idx = top_index + (y - 3)
-                    if 0 <= idx < len(rows):
-                        selected = idx
-                        if self.mouse_button1_double(state):
-                            return selected
-                continue
-            if ch == curses.KEY_UP:
-                selected = max(0, selected - 1)
-            elif ch == curses.KEY_DOWN:
-                selected = min(len(rows) - 1, selected + 1)
-            elif ch == curses.KEY_PPAGE:
-                selected = max(0, selected - visible_h)
-            elif ch == curses.KEY_NPAGE:
-                selected = min(len(rows) - 1, selected + visible_h)
-            elif ch == curses.KEY_HOME:
-                selected = 0
-            elif ch == curses.KEY_END:
-                selected = len(rows) - 1
-
-    # ---------------------------------------------------------------------
-    # Feature menus
-    # ---------------------------------------------------------------------
-
-    def show_help(self) -> None:
-        self.show_message(
-            "HELP",
-            [
-                "F1 Help | F2 Models | F3 API Key | F4 Sessions | F5 Options",
-                "F6 Memory | F7 Files | F8 External Editor | F9 Credits | F10 Quit",
-                "Ctrl+G or F5 sends the current message. Enter inserts a newline.",
-                "Mousewheel scrolls transcript or lists. Click in input places cursor.",
-            ],
-        )
-
-    def show_credits(self) -> None:
-        self.show_message(
-            "CREDITS",
-            [
-                "gemini-terminal-tools",
-                f"GitHub: {PROJECT_URL}",
-                "",
-                PROJECT_NOTICE,
-            ],
-        )
-
-    def open_api_key_manager(self) -> None:
-        choices = [
-            "Paste API key for this session only",
-            "Paste API key and save to config",
-            "Forget runtime API key",
-            "Remove GEMINI_API_KEY from config",
-        ]
-        idx = self.select_menu("API KEY", choices)
-        if idx is None:
+    def open_api_key_input(self) -> None:
+        key = self.text_input_modal("API KEY", "Paste Gemini API key. It is used for this run unless you choose to save it.", secret=True)
+        if not key:
+            self.status = "API key entry cancelled"
             return
-        if idx in (0, 1):
-            key = self.text_input_modal("API KEY INPUT", "Paste Gemini API key.", secret=True)
-            if not key:
-                self.status = "API key entry cancelled"
-                return
-            self.cfg.api_key = key
-            if idx == 1:
-                set_config_value(self.cfg, "GEMINI_API_KEY", key)
-                self.status = "API key saved to config"
-            else:
-                self.status = "API key active for this session only"
-        elif idx == 2:
+        self.cfg.api_key = key
+        if self.ask_yes_no("SAVE API KEY", "Save GEMINI_API_KEY to config? This stores it in plaintext. Default is no.", default=False):
+            set_config_value(self.cfg, "GEMINI_API_KEY", key)
+            self.status = "API key saved to config"
+        else:
+            self.status = "API key active for this run only"
+        if self.ask_yes_no("FORGET API KEY", "Forget the runtime API key now? Default is no.", default=False):
             self.cfg.api_key = ""
-            self.status = "runtime API key forgotten"
-        elif idx == 3:
-            delete_config_value(self.cfg, "GEMINI_API_KEY")
-            self.status = "GEMINI_API_KEY removed from config"
+            self.status = "API key forgotten for this run"
 
     def show_model_info(self, model: ModelInfo) -> None:
-        self.show_message(
-            "MODEL INFO",
-            [
-                f"Model ID: {model.model_id}",
-                f"API name: {model.api_name}",
-                f"Display name: {model.display_name}",
-                f"Input token limit: {model.input_token_limit}",
-                f"Output token limit: {model.output_token_limit}",
-                f"Methods: {', '.join(model.methods)}",
-                "",
-                model.description or "No description returned by API.",
-            ],
-        )
+        self.show_message("MODEL INFO", [
+            f"Model ID: {model.model_id}",
+            f"API name: {model.api_name}",
+            f"Display name: {model.display_name}",
+            f"Input token limit: {model.input_token_limit}",
+            f"Output token limit: {model.output_token_limit}",
+            f"Methods: {', '.join(model.methods)}",
+            "",
+            model.description or "No description returned by API.",
+        ])
 
-    def test_model_dialog(self, model: ModelInfo) -> None:
+    def test_model_interactive(self, model: ModelInfo) -> None:
+        if not self.cfg.api_key:
+            self.show_message("MODEL TEST", ["No API key loaded. Press F3 first."])
+            return
         self.status = f"testing model: {model.model_id}"
         self.draw()
-        ok, text = generate_with_model(self.cfg, model.model_id, self.cfg.model_test_prompt, timeout=60)
-        title = "MODEL TEST OK" if ok else "MODEL TEST FAILED"
-        self.show_message(
-            title,
-            [
-                f"Model: {model.model_id}",
-                f"Prompt: {self.cfg.model_test_prompt}",
-                "",
-                "Response:",
-                text,
-            ],
-        )
-        self.status = f"tested model: {model.model_id}"
+        ok, text = generate_with_model(self.cfg, model.model_id, self.cfg.model_test_prompt, self.session_name, self.attachment_dir, [], timeout=60)
+        lines = ["Prompt sent:", self.cfg.model_test_prompt, "", "Model response:", text]
+        self.show_message("MODEL TEST RESULT", lines)
+        if ok and self.ask_yes_no("ACTIVATE MODEL", f"Activate {model.model_id} for this run?", default=True):
+            self.cfg.model = model.model_id
+            self.transcript.append(TranscriptItem("system", f"Model activated after test: {model.model_id}"))
+            self.status = f"activated model: {model.model_id}"
+            if self.ask_yes_no("SAVE MODEL", f"Save MODEL={model.model_id} to config?", default=True):
+                set_config_value(self.cfg, "MODEL", model.model_id)
+                self.status = f"model saved: {model.model_id}"
 
     def open_model_selector(self) -> None:
         if not self.cfg.api_key:
-            self.show_message("MODEL SELECTOR", ["No API key is loaded. Press F3 to paste an API key."])
-            self.status = "model selector cancelled: no API key"
+            self.show_message("MODEL SELECTOR", ["No API key is loaded. Press F3 to paste one."])
             return
-
         self.status = "loading model list..."
         self.draw()
         models, error = fetch_models(self.cfg)
         if error:
             self.show_message("MODEL LIST ERROR", wrap_for_width(error, 70))
-            self.status = "model list failed"
             return
         if not models:
             self.show_message("MODEL SELECTOR", ["No generateContent models returned by the API."])
@@ -1312,17 +1239,14 @@ class GeminiCursesApp:
             self.stdscr.erase()
             height, width = self.stdscr.getmaxyx()
             visible_h = max(1, height - 7)
-
-            self.safe_addstr(0, 0, "MODEL SELECTOR", width, curses.A_REVERSE)
-            self.safe_addstr(1, 0, f"Current model: {self.model_label()}", width, curses.A_DIM)
-            self.safe_addstr(2, 0, "Enter=activate | t=test | s=save | i=info | q/Esc=cancel | click/dbl-click", width, curses.A_DIM)
-            self.safe_addstr(3, 0, "_" * width, width, curses.A_DIM)
-
+            self.safe_addstr(0, 0, "MODEL SELECTOR", width, self.reverse_attr())
+            self.safe_addstr(1, 0, f"Current model: {self.model_label()}", width)
+            self.safe_addstr(2, 0, "Enter=activate | t=test | i=info | s=save highlighted | Esc/q=cancel | wheel=scroll", width, self.dim_attr())
+            self.safe_addstr(3, 0, "_" * width, width, self.dim_attr())
             if selected < top_index:
                 top_index = selected
             elif selected >= top_index + visible_h:
                 top_index = selected - visible_h + 1
-
             for row in range(visible_h):
                 model_index = top_index + row
                 if model_index >= len(models):
@@ -1333,17 +1257,15 @@ class GeminiCursesApp:
                     limits = f" in:{model.input_token_limit or '?'} out:{model.output_token_limit or '?'}"
                 current_marker = "* " if model.model_id == current else "  "
                 line = f"{current_marker}{model.model_id} - {model.display_name}{limits}"
-                attr = curses.A_REVERSE if model_index == selected else 0
+                attr = self.reverse_attr() if model_index == selected else 0
                 self.safe_addstr(4 + row, 0, line, width, attr)
-
-            self.safe_addstr(height - 2, 0, "_" * width, width, curses.A_DIM)
-            self.safe_addstr(height - 1, 0, f"{selected + 1}/{len(models)}", width, curses.A_DIM)
+            self.safe_addstr(height - 2, 0, "_" * width, width, self.dim_attr())
+            self.safe_addstr(height - 1, 0, f"{selected + 1}/{len(models)}", width, self.dim_attr())
             self.stdscr.refresh()
-
             ch = self.stdscr.getch()
             if ch == curses.KEY_MOUSE:
                 try:
-                    _mouse_id, _x, y, _z, state = curses.getmouse()
+                    _mid, _x, y, _z, state = curses.getmouse()
                 except curses.error:
                     continue
                 delta = self.mouse_wheel_delta(state)
@@ -1358,14 +1280,10 @@ class GeminiCursesApp:
                     if 0 <= idx < len(models):
                         selected = idx
                         if self.mouse_button1_double(state):
-                            chosen = models[selected]
-                            self.cfg.model = chosen.model_id
-                            self.status = f"activated model: {chosen.model_id}"
-                            self.transcript.append(TranscriptItem("system", f"Model activated: {chosen.model_id}"))
-                            self.maybe_save_model_to_config()
+                            self.cfg.model = models[selected].model_id
+                            self.status = f"activated model: {self.cfg.model}"
                             return
-                continue
-
+                    continue
             if ch in (27, ord("q"), ord("Q")):
                 self.status = "model selection cancelled"
                 return
@@ -1373,19 +1291,17 @@ class GeminiCursesApp:
                 self.show_model_info(models[selected])
                 continue
             if ch in (ord("t"), ord("T")):
-                self.test_model_dialog(models[selected])
+                self.test_model_interactive(models[selected])
+                current = normalize_model_id(self.cfg.effective_model)
                 continue
             if ch in (ord("s"), ord("S")):
                 set_config_value(self.cfg, "MODEL", models[selected].model_id)
-                self.cfg.model = models[selected].model_id
-                self.status = f"saved model: {self.cfg.model}"
+                self.status = f"model saved: {models[selected].model_id}"
                 return
             if ch in (10, 13, curses.KEY_ENTER):
-                chosen = models[selected]
-                self.cfg.model = chosen.model_id
-                self.status = f"activated model: {chosen.model_id}"
-                self.transcript.append(TranscriptItem("system", f"Model activated: {chosen.model_id}"))
-                self.maybe_save_model_to_config()
+                self.cfg.model = models[selected].model_id
+                self.status = f"activated model: {self.cfg.model}"
+                self.transcript.append(TranscriptItem("system", f"Model activated: {self.cfg.model}"))
                 return
             if ch == curses.KEY_UP:
                 selected = max(0, selected - 1)
@@ -1400,284 +1316,372 @@ class GeminiCursesApp:
             elif ch == curses.KEY_END:
                 selected = len(models) - 1
 
-    def maybe_save_model_to_config(self) -> None:
-        if self.cfg.model and self.ask_yes_no("SAVE MODEL", f"Save MODEL={self.cfg.model} to config?", default=True):
-            set_config_value(self.cfg, "MODEL", self.cfg.model)
-            self.status = f"model saved: {self.cfg.model}"
+    def session_names(self) -> List[str]:
+        self.cfg.session_dir.mkdir(parents=True, exist_ok=True)
+        return sorted(path.stem for path in self.cfg.session_dir.glob("*.log"))
 
-    def open_sessions_menu(self) -> None:
-        while True:
-            rows = ["Rename current session", "New timestamped session"]
-            logs = sorted(self.cfg.session_dir.glob("*.log"))
-            rows.extend([f"Open: {path.stem}" for path in logs])
-            idx = self.select_menu("SESSIONS", rows, "Enter=select | q/Esc=cancel")
-            if idx is None:
-                return
-            if idx == 0:
-                self.rename_current_session()
-                return
-            if idx == 1:
-                self.session_name = default_session_name()
-                self.session_path = self.cfg.session_dir / f"{self.session_name}.log"
-                self.transcript = []
-                self.context_buffer = []
-                self.status = f"new session: {self.session_name}"
-                return
-            path = logs[idx - 2]
-            self.session_name = path.stem
-            self.session_path = path
-            self.load_session_into_ui()
-            return
-
-    def rename_current_session(self) -> None:
-        new_name = self.text_input_modal("RENAME SESSION", "Enter new session name:", self.session_name)
-        if not new_name:
-            return
+    def rename_session(self, old_name: str, new_name: str) -> None:
         new_name = sanitize_session_name(new_name)
+        old_path = self.cfg.session_dir / f"{old_name}.log"
         new_path = self.cfg.session_dir / f"{new_name}.log"
-        if new_path.exists() and new_path != self.session_path:
-            self.show_message("RENAME FAILED", [f"Target session already exists: {new_name}"])
+        if new_path.exists() and new_path != old_path:
+            self.show_message("RENAME SESSION", [f"Target already exists: {new_name}"])
             return
-        if self.session_path.exists():
-            self.session_path.rename(new_path)
-        self.session_name = new_name
-        self.session_path = new_path
-        self.status = f"renamed session: {new_name}"
+        if old_path.exists():
+            old_path.rename(new_path)
+        # Rename attachment prefixes for consistency.
+        for path in self.attachment_dir.glob(f"{old_name}-*"):
+            path.rename(self.attachment_dir / (new_name + path.name[len(old_name):]))
+        if old_name == self.session_name:
+            self.session_name = new_name
+            self.session_path = new_path
+        self.status = f"renamed session: {old_name} -> {new_name}"
+
+    def open_session_browser(self) -> None:
+        selected = 0
+        top_index = 0
+        while True:
+            names = self.session_names()
+            if not names:
+                self.show_message("SESSIONS", ["No sessions found."])
+                return
+            selected = min(selected, len(names) - 1)
+            self.stdscr.erase()
+            height, width = self.stdscr.getmaxyx()
+            visible_h = max(1, height - 6)
+            self.safe_addstr(0, 0, "SESSION BROWSER", width, self.reverse_attr())
+            self.safe_addstr(1, 0, "Enter=switch | r=rename highlighted | n=rename current | Esc/q=cancel | wheel=scroll", width, self.dim_attr())
+            self.safe_addstr(2, 0, f"Current: {self.session_name}", width)
+            self.safe_addstr(3, 0, "_" * width, width, self.dim_attr())
+            if selected < top_index:
+                top_index = selected
+            elif selected >= top_index + visible_h:
+                top_index = selected - visible_h + 1
+            for row in range(visible_h):
+                idx = top_index + row
+                if idx >= len(names):
+                    break
+                marker = "* " if names[idx] == self.session_name else "  "
+                attr = self.reverse_attr() if idx == selected else 0
+                self.safe_addstr(4 + row, 0, marker + names[idx], width, attr)
+            self.safe_addstr(height - 1, 0, f"{selected + 1}/{len(names)}", width, self.dim_attr())
+            self.stdscr.refresh()
+            ch = self.stdscr.getch()
+            if ch == curses.KEY_MOUSE:
+                try:
+                    _mid, _x, y, _z, state = curses.getmouse()
+                except curses.error:
+                    continue
+                delta = self.mouse_wheel_delta(state)
+                if delta > 0:
+                    selected = max(0, selected - MOUSE_SCROLL_LINES)
+                elif delta < 0:
+                    selected = min(len(names) - 1, selected + MOUSE_SCROLL_LINES)
+                elif self.mouse_button1(state) and 4 <= y < 4 + visible_h:
+                    idx = top_index + (y - 4)
+                    if 0 <= idx < len(names):
+                        selected = idx
+                continue
+            if ch in (27, ord("q"), ord("Q")):
+                return
+            if ch in (10, 13, curses.KEY_ENTER):
+                name = names[selected]
+                self.reset_to_session(name, self.cfg.session_dir / f"{name}.log")
+                return
+            if ch in (ord("r"), ord("R")):
+                old = names[selected]
+                new = self.text_input_modal("RENAME SESSION", f"Rename session '{old}' to:", old)
+                if new:
+                    self.rename_session(old, new)
+                continue
+            if ch in (ord("n"), ord("N")):
+                new = self.text_input_modal("RENAME CURRENT SESSION", "New name for current session:", self.session_name)
+                if new:
+                    self.rename_session(self.session_name, new)
+                continue
+            if ch == curses.KEY_UP:
+                selected = max(0, selected - 1)
+            elif ch == curses.KEY_DOWN:
+                selected = min(len(names) - 1, selected + 1)
+            elif ch == curses.KEY_PPAGE:
+                selected = max(0, selected - visible_h)
+            elif ch == curses.KEY_NPAGE:
+                selected = min(len(names) - 1, selected + visible_h)
 
     def open_options_menu(self) -> None:
+        selected = 0
+        top_index = 0
         while True:
-            rows = [
-                f"MODEL = {self.cfg.model or '(unset; fallback used)'}",
-                f"CONTEXT_TURNS = {self.cfg.context_turns}",
-                f"SESSION_DIR = {self.cfg.session_dir}",
-                f"ATTACHMENT_DIR = {self.cfg.effective_attachment_dir}",
-                f"EDITOR = {self.cfg.editor or '(VISUAL/EDITOR/default)'}",
-                f"MODEL_TEST_PROMPT = {self.cfg.model_test_prompt}",
-                f"MAX_ATTACHMENT_BYTES = {self.cfg.max_attachment_bytes}",
+            options = [
+                ("MODEL", self.cfg.model),
+                ("CONTEXT_TURNS", str(self.cfg.context_turns)),
+                ("SESSION_DIR", str(self.cfg.session_dir)),
+                ("ATTACHMENT_DIR", str(self.cfg.effective_attachment_dir)),
+                ("EDITOR", self.cfg.effective_editor),
+                ("GITHUB_URL", self.cfg.github_url),
+                ("MODEL_TEST_PROMPT", self.cfg.model_test_prompt),
+                ("INPUT_PLACEHOLDER", self.cfg.input_placeholder),
+                ("MONOCHROME", "1" if self.cfg.monochrome else "0"),
+                ("STARTUP_NOTICE", "1" if self.cfg.startup_notice else "0"),
             ]
-            idx = self.select_menu("OPTIONS", rows, "Enter=edit | q/Esc=cancel")
-            if idx is None:
+            selected = min(selected, len(options) - 1)
+            self.stdscr.erase()
+            height, width = self.stdscr.getmaxyx()
+            visible_h = max(1, height - 4)
+            self.safe_addstr(0, 0, "OPTIONS MENU", width, self.attr_header())
+            self.safe_addstr(1, 0, "Enter=edit/save | Esc/q=cancel | API key is handled by F3 | wheel=scroll", width, self.attr_dim())
+            self.safe_addstr(2, 0, "_" * width, width, self.attr_dim())
+            if selected < top_index:
+                top_index = selected
+            elif selected >= top_index + visible_h:
+                top_index = selected - visible_h + 1
+            for row in range(visible_h):
+                idx = top_index + row
+                if idx >= len(options):
+                    break
+                key, value = options[idx]
+                attr = self.attr_header() if idx == selected else 0
+                self.safe_addstr(3 + row, 0, f"{key}={value}", width, attr)
+            self.stdscr.refresh()
+            ch = self.stdscr.getch()
+            if ch == curses.KEY_MOUSE:
+                try:
+                    _mid, _x, y, _z, state = curses.getmouse()
+                except curses.error:
+                    continue
+                delta = self.mouse_wheel_delta(state)
+                if delta > 0:
+                    selected = max(0, selected - MOUSE_SCROLL_LINES)
+                elif delta < 0:
+                    selected = min(len(options) - 1, selected + MOUSE_SCROLL_LINES)
+                elif self.mouse_button1(state) and 3 <= y < 3 + visible_h:
+                    idx = top_index + (y - 3)
+                    if 0 <= idx < len(options):
+                        selected = idx
+                        if self.mouse_button1_double(state):
+                            ch = 10
+                else:
+                    continue
+            if ch in (27, ord("q"), ord("Q")):
                 return
-            keys = ["MODEL", "CONTEXT_TURNS", "SESSION_DIR", "ATTACHMENT_DIR", "EDITOR", "MODEL_TEST_PROMPT", "MAX_ATTACHMENT_BYTES"]
-            key = keys[idx]
-            current = ""
-            if key == "MODEL":
-                current = self.cfg.model
-            elif key == "CONTEXT_TURNS":
-                current = str(self.cfg.context_turns)
-            elif key == "SESSION_DIR":
-                current = str(self.cfg.session_dir)
-            elif key == "ATTACHMENT_DIR":
-                current = str(self.cfg.effective_attachment_dir)
-            elif key == "EDITOR":
-                current = self.cfg.editor
-            elif key == "MODEL_TEST_PROMPT":
-                current = self.cfg.model_test_prompt
-            elif key == "MAX_ATTACHMENT_BYTES":
-                current = str(self.cfg.max_attachment_bytes)
-            value = self.text_input_modal("EDIT OPTION", f"Set {key}:", current)
-            if value is None:
-                continue
-            set_config_value(self.cfg, key, value)
-            if key == "MODEL":
-                self.cfg.model = normalize_model_id(value)
-            elif key == "CONTEXT_TURNS":
-                self.cfg.context_turns = parse_positive_int(value, self.cfg.context_turns)
-            elif key == "SESSION_DIR":
-                self.cfg.session_dir = expand_path(value)
-            elif key == "ATTACHMENT_DIR":
-                self.cfg.attachment_dir = expand_path(value)
-                self.attachment_dir = self.cfg.effective_attachment_dir
-            elif key == "EDITOR":
-                self.cfg.editor = value
-            elif key == "MODEL_TEST_PROMPT":
-                self.cfg.model_test_prompt = value
-            elif key == "MAX_ATTACHMENT_BYTES":
-                self.cfg.max_attachment_bytes = parse_positive_int(value, self.cfg.max_attachment_bytes)
-            self.status = f"option saved: {key}"
+            if ch == curses.KEY_UP:
+                selected = max(0, selected - 1)
+            elif ch == curses.KEY_DOWN:
+                selected = min(len(options) - 1, selected + 1)
+            elif ch == curses.KEY_PPAGE:
+                selected = max(0, selected - visible_h)
+            elif ch == curses.KEY_NPAGE:
+                selected = min(len(options) - 1, selected + visible_h)
+            elif ch in (10, 13, curses.KEY_ENTER):
+                key, value = options[selected]
+                new = self.text_input_modal("EDIT OPTION", f"Enter value for {key}:", value)
+                if new is None:
+                    continue
+                set_config_value(self.cfg, key, new)
+                if key == "MODEL": self.cfg.model = normalize_model_id(new)
+                elif key == "CONTEXT_TURNS": self.cfg.context_turns = parse_positive_int(new, self.cfg.context_turns)
+                elif key == "SESSION_DIR": self.cfg.session_dir = expand_path(new)
+                elif key == "ATTACHMENT_DIR": self.cfg.attachment_dir = expand_path(new); self.attachment_dir = self.cfg.effective_attachment_dir
+                elif key == "EDITOR": self.cfg.editor = new
+                elif key == "GITHUB_URL": self.cfg.github_url = new
+                elif key == "MODEL_TEST_PROMPT": self.cfg.model_test_prompt = new
+                elif key == "INPUT_PLACEHOLDER": self.cfg.input_placeholder = new
+                elif key == "MONOCHROME": self.cfg.monochrome = parse_bool(new, self.cfg.monochrome)
+                elif key == "STARTUP_NOTICE": self.cfg.startup_notice = parse_bool(new, self.cfg.startup_notice)
+                self.cfg.session_dir.mkdir(parents=True, exist_ok=True)
+                self.cfg.effective_attachment_dir.mkdir(parents=True, exist_ok=True)
+                self.status = f"saved option: {key}"
+                return
 
     def open_memory_menu(self) -> None:
         while True:
-            rows = [
-                "View current memory",
-                "Edit current memory in external editor",
-                "Clear current memory",
-                "Rebuild memory from session log",
-            ]
-            idx = self.select_menu("MEMORY", rows)
-            if idx is None:
-                return
-            if idx == 0:
-                self.show_message("CURRENT MEMORY", self.context_buffer or ["(memory empty)"])
-            elif idx == 1:
-                self.edit_memory_external()
-            elif idx == 2:
-                if self.ask_yes_no("CLEAR MEMORY", "Clear current in-memory context?", default=False):
+            self.stdscr.erase()
+            height, width = self.stdscr.getmaxyx()
+            choices = ["v view memory", "e edit memory in external editor", "c clear memory", "r rebuild from log", "q cancel"]
+            self.safe_addstr(0, 0, "MEMORY MENU", width, self.reverse_attr())
+            self.safe_addstr(1, 0, f"Context entries: {len(self.context_buffer)} | CONTEXT_TURNS={self.cfg.context_turns}", width)
+            for idx, item in enumerate(choices):
+                self.safe_addstr(3 + idx, 0, item, width)
+            self.stdscr.refresh()
+            ch = self.stdscr.getch()
+            if ch in (ord("q"), ord("Q"), 27): return
+            if ch in (ord("v"), ord("V")):
+                self.show_message("CURRENT MEMORY", self.context_buffer or ["Memory is empty."])
+            elif ch in (ord("e"), ord("E")):
+                edited = self.run_external_editor("\n".join(self.context_buffer))
+                if edited is not None:
+                    self.context_buffer = [line for line in edited.splitlines() if line.strip()]
+                    self.trim_context_buffer()
+                    self.save_context_snapshot()
+                    self.status = "memory edited and snapshot saved"
+                    return
+            elif ch in (ord("c"), ord("C")):
+                if self.ask_yes_no("CLEAR MEMORY", "Clear current memory context? Logs are not deleted.", default=False):
                     self.context_buffer = []
                     self.save_context_snapshot()
                     self.status = "memory cleared"
                     return
-            elif idx == 3:
-                self.load_session_into_ui()
+            elif ch in (ord("r"), ord("R")):
+                self.context_buffer = []
+                entries = load_log_entries(self.session_path)
+                snapshot = latest_context_snapshot(entries)
+                if snapshot:
+                    self.context_buffer = snapshot
+                else:
+                    max_entries = self.cfg.context_turns * 2
+                    for entry in entries[-max_entries:]:
+                        if is_snapshot_entry(entry) or entry.speaker == "system": continue
+                        self.context_buffer.append(("Assistant: " if entry.speaker == "Gemini" else "User: ") + entry.text)
+                self.trim_context_buffer()
                 self.status = "memory rebuilt from log"
                 return
 
-    def edit_memory_external(self) -> None:
-        text = "\n".join(self.context_buffer)
-        edited = self.edit_text_external(text, suffix=".memory.txt")
-        if edited is None:
-            return
-        self.context_buffer = [line for line in edited.splitlines() if line.strip()]
-        self.trim_context_buffer()
-        self.save_context_snapshot()
-        self.status = "memory edited"
+    def file_picker(self, start_dir: Path, title: str) -> Optional[Path]:
+        current = start_dir.expanduser().resolve()
+        selected = 0
+        top_index = 0
+        while True:
+            try:
+                entries = [current.parent] + sorted(current.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
+            except OSError as exc:
+                self.show_message(title, [f"Cannot read directory: {exc}"])
+                return None
+            selected = min(selected, len(entries) - 1)
+            self.stdscr.erase()
+            height, width = self.stdscr.getmaxyx()
+            visible_h = max(1, height - 5)
+            self.safe_addstr(0, 0, title, width, self.reverse_attr())
+            self.safe_addstr(1, 0, f"Directory: {current}", width)
+            self.safe_addstr(2, 0, "Enter=open/select | Esc/q=cancel | wheel=scroll", width, self.dim_attr())
+            if selected < top_index: top_index = selected
+            elif selected >= top_index + visible_h: top_index = selected - visible_h + 1
+            for row in range(visible_h):
+                idx = top_index + row
+                if idx >= len(entries): break
+                p = entries[idx]
+                label = "../" if idx == 0 else (p.name + ("/" if p.is_dir() else ""))
+                attr = self.reverse_attr() if idx == selected else 0
+                self.safe_addstr(3 + row, 0, label, width, attr)
+            self.stdscr.refresh()
+            ch = self.stdscr.getch()
+            if ch == curses.KEY_MOUSE:
+                try: _mid, _x, y, _z, state = curses.getmouse()
+                except curses.error: continue
+                delta = self.mouse_wheel_delta(state)
+                if delta > 0: selected = max(0, selected - MOUSE_SCROLL_LINES)
+                elif delta < 0: selected = min(len(entries) - 1, selected + MOUSE_SCROLL_LINES)
+                elif self.mouse_button1(state) and 3 <= y < 3 + visible_h:
+                    idx = top_index + (y - 3)
+                    if 0 <= idx < len(entries): selected = idx
+                continue
+            if ch in (27, ord("q"), ord("Q")): return None
+            if ch == curses.KEY_UP: selected = max(0, selected - 1)
+            elif ch == curses.KEY_DOWN: selected = min(len(entries) - 1, selected + 1)
+            elif ch in (10, 13, curses.KEY_ENTER):
+                chosen = entries[selected]
+                if chosen.is_dir():
+                    current = chosen.resolve(); selected = 0; top_index = 0
+                else:
+                    return chosen
 
     def open_file_menu(self) -> None:
+        choices = [
+            ("a", "attach file for next Gemini request"),
+            ("l", "list pending files"),
+            ("c", "clear pending files"),
+            ("b", "browse saved attachment directory"),
+            ("q", "cancel"),
+        ]
+        selected = 0
         while True:
-            rows = [
-                f"Attach file for next message ({len(self.pending_attachments)} pending)",
-                "List pending attachments",
-                "Clear pending attachments",
-                "Browse saved generated/code attachments",
-            ]
-            idx = self.select_menu("FILES", rows)
-            if idx is None:
-                return
-            if idx == 0:
-                self.attach_file_browser(Path.cwd())
-            elif idx == 1:
-                if not self.pending_attachments:
-                    self.show_message("PENDING ATTACHMENTS", ["No pending attachments."])
+            self.stdscr.erase()
+            height, width = self.stdscr.getmaxyx()
+            self.safe_addstr(0, 0, "FILES / ATTACHMENTS", width, self.attr_header())
+            self.safe_addstr(1, 0, f"Pending files: {len(self.pending_attachments)}", width)
+            self.safe_addstr(2, 0, "Enter=select | Esc/q=cancel | wheel=move", width, self.attr_dim())
+            self.safe_addstr(3, 0, "_" * width, width, self.attr_dim())
+            visible_h = max(1, height - 5)
+            for row, (_key, label) in enumerate(choices[:visible_h]):
+                attr = self.attr_header() if row == selected else 0
+                self.safe_addstr(4 + row, 0, f"{_key}  {label}", width, attr)
+            self.stdscr.refresh()
+
+            ch = self.stdscr.getch()
+            if ch == curses.KEY_MOUSE:
+                try:
+                    _mid, _x, y, _z, state = curses.getmouse()
+                except curses.error:
+                    continue
+                delta = self.mouse_wheel_delta(state)
+                if delta > 0:
+                    selected = max(0, selected - 1)
+                elif delta < 0:
+                    selected = min(len(choices) - 1, selected + 1)
+                elif self.mouse_button1(state) and 4 <= y < 4 + len(choices):
+                    selected = y - 4
+                    ch = 10
                 else:
-                    self.show_message(
-                        "PENDING ATTACHMENTS",
-                        [f"{att.path} ({att.mime_type}, {att.size} bytes, {att.mode})" for att in self.pending_attachments],
-                    )
-            elif idx == 2:
-                self.pending_attachments = []
-                self.status = "pending attachments cleared"
-                return
-            elif idx == 3:
-                self.browse_attachment_dir()
+                    continue
 
-    def file_rows(self, directory: Path) -> Tuple[List[str], List[Path]]:
-        entries = []
-        paths = []
-        if directory.parent != directory:
-            entries.append("../")
-            paths.append(directory.parent)
-        for path in sorted(directory.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())):
-            suffix = "/" if path.is_dir() else ""
-            entries.append(path.name + suffix)
-            paths.append(path)
-        return entries, paths
-
-    def attach_file_browser(self, start: Path) -> None:
-        current = start
-        while True:
-            try:
-                rows, paths = self.file_rows(current)
-            except Exception as exc:
-                self.show_message("FILE BROWSER ERROR", [str(exc)])
+            if ch in (27, ord("q"), ord("Q")):
                 return
-            idx = self.select_menu(f"ATTACH FILE: {current}", rows, "Enter=open/attach | q/Esc=cancel")
-            if idx is None:
-                return
-            selected = paths[idx]
-            if selected.is_dir():
-                current = selected
+            if ch == curses.KEY_UP:
+                selected = max(0, selected - 1)
                 continue
-            self.add_pending_attachment(selected)
-            return
+            if ch == curses.KEY_DOWN:
+                selected = min(len(choices) - 1, selected + 1)
+                continue
+            if ch in (10, 13, curses.KEY_ENTER):
+                action = choices[selected][0]
+            else:
+                action = chr(ch).lower() if 0 <= ch < 256 else ""
 
-    def add_pending_attachment(self, path: Path) -> None:
-        try:
-            size = path.stat().st_size
-        except OSError as exc:
-            self.show_message("ATTACH FAILED", [str(exc)])
-            return
-        if size > self.cfg.max_attachment_bytes:
-            self.show_message("ATTACH FAILED", [f"File too large: {size} bytes", f"Limit: {self.cfg.max_attachment_bytes} bytes"])
-            return
-        mime, _encoding = mimetypes.guess_type(str(path))
-        mime = mime or "application/octet-stream"
-        mode = "text" if mime.startswith("text/") or mime in ("application/json", "application/xml") else "inlineData"
-        self.pending_attachments.append(PendingAttachment(path, mime, mode, size))
-        self.status = f"attached for next message: {path.name}"
-
-    def browse_attachment_dir(self) -> None:
-        rows = []
-        paths = []
-        for path in sorted(self.attachment_dir.glob("*")):
-            if path.is_file():
-                rows.append(path.name)
-                paths.append(path)
-        idx = self.select_menu("SAVED ATTACHMENTS", rows, "Enter=view text-ish file | q/Esc=cancel")
-        if idx is None:
-            return
-        path = paths[idx]
-        try:
-            if path.stat().st_size > 200000:
-                self.show_message("ATTACHMENT", [f"File: {path}", "Too large to preview in dialog."])
+            if action == "a":
+                path = self.file_picker(Path.cwd(), "ATTACH FILE")
+                if path:
+                    self.pending_attachments.append(PendingAttachment(path, guess_mime(path)))
+                    self.status = f"attached file for next request: {path.name}"
+                    return
+            elif action == "l":
+                self.show_message("PENDING FILES", [f"{p.path} ({p.mime_type})" for p in self.pending_attachments] or ["No pending files."])
+            elif action == "c":
+                self.pending_attachments = []
+                self.status = "pending files cleared"
                 return
-            text = path.read_text(encoding="utf-8", errors="replace")
-            self.show_message(path.name, text.splitlines() or [""])
-        except Exception as exc:
-            self.show_message("ATTACHMENT", [f"File: {path}", str(exc)])
-
-    def edit_text_external(self, initial_text: str, suffix: str = ".txt") -> Optional[str]:
-        editor = self.cfg.effective_editor or shutil.which("nano") or shutil.which("vi")
-        if not editor:
-            self.show_message("EDITOR", ["No editor found. Set EDITOR in config or VISUAL/EDITOR in environment."])
-            return None
-        with tempfile.NamedTemporaryFile("w+", suffix=suffix, delete=False, encoding="utf-8") as tmp:
-            tmp.write(initial_text)
-            tmp_path = tmp.name
-        try:
-            curses.def_prog_mode()
-            curses.endwin()
-            subprocess.run([editor, tmp_path])
-            curses.reset_prog_mode()
-            self.stdscr.keypad(True)
-            with open(tmp_path, "r", encoding="utf-8", errors="replace") as fh:
-                return fh.read()
-        finally:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
+            elif action == "b":
+                path = self.file_picker(self.attachment_dir, "BROWSE SAVED ATTACHMENTS")
+                if path and self.ask_yes_no("OPEN FILE", f"Open {path.name} in external editor/viewer?", default=True):
+                    self.run_external_editor(path.read_text(encoding="utf-8", errors="replace") if path.stat().st_size < 2_000_000 else f"Binary/large file: {path}")
+                    return
 
     def open_external_editor_for_input(self) -> None:
-        edited = self.edit_text_external(self.current_input(), suffix=".prompt.txt")
-        if edited is None:
-            return
-        self.input_lines = edited.rstrip("\n").split("\n") or [""]
-        self.cursor_row = len(self.input_lines) - 1
-        self.cursor_col = len(self.input_lines[self.cursor_row])
-        self.status = "input loaded from editor"
+        edited = self.run_external_editor(self.current_input())
+        if edited is not None:
+            self.input_lines = edited.rstrip("\n").splitlines() or [""]
+            self.cursor_row = len(self.input_lines) - 1
+            self.cursor_col = len(self.input_lines[-1])
+            self.status = "input loaded from external editor"
 
-    # ---------------------------------------------------------------------
-    # Input editing
-    # ---------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Input editing and sending
+    # ------------------------------------------------------------------
 
     def insert_text(self, text: str) -> None:
         line = self.input_lines[self.cursor_row]
-        self.input_lines[self.cursor_row] = line[: self.cursor_col] + text + line[self.cursor_col :]
+        self.input_lines[self.cursor_row] = line[: self.cursor_col] + text + line[self.cursor_col:]
         self.cursor_col += len(text)
 
     def insert_newline(self) -> None:
         line = self.input_lines[self.cursor_row]
-        before = line[: self.cursor_col]
-        after = line[self.cursor_col :]
-        self.input_lines[self.cursor_row] = before
-        self.input_lines.insert(self.cursor_row + 1, after)
+        self.input_lines[self.cursor_row] = line[: self.cursor_col]
+        self.input_lines.insert(self.cursor_row + 1, line[self.cursor_col:])
         self.cursor_row += 1
         self.cursor_col = 0
 
     def backspace(self) -> None:
         if self.cursor_col > 0:
             line = self.input_lines[self.cursor_row]
-            self.input_lines[self.cursor_row] = line[: self.cursor_col - 1] + line[self.cursor_col :]
+            self.input_lines[self.cursor_row] = line[: self.cursor_col - 1] + line[self.cursor_col:]
             self.cursor_col -= 1
         elif self.cursor_row > 0:
             previous_len = len(self.input_lines[self.cursor_row - 1])
@@ -1689,48 +1693,33 @@ class GeminiCursesApp:
     def delete_forward(self) -> None:
         line = self.input_lines[self.cursor_row]
         if self.cursor_col < len(line):
-            self.input_lines[self.cursor_row] = line[: self.cursor_col] + line[self.cursor_col + 1 :]
+            self.input_lines[self.cursor_row] = line[: self.cursor_col] + line[self.cursor_col + 1:]
         elif self.cursor_row < len(self.input_lines) - 1:
             self.input_lines[self.cursor_row] += self.input_lines[self.cursor_row + 1]
             del self.input_lines[self.cursor_row + 1]
 
     def move_left(self) -> None:
-        if self.cursor_col > 0:
-            self.cursor_col -= 1
-        elif self.cursor_row > 0:
-            self.cursor_row -= 1
-            self.cursor_col = len(self.input_lines[self.cursor_row])
+        if self.cursor_col > 0: self.cursor_col -= 1
+        elif self.cursor_row > 0: self.cursor_row -= 1; self.cursor_col = len(self.input_lines[self.cursor_row])
 
     def move_right(self) -> None:
         line = self.input_lines[self.cursor_row]
-        if self.cursor_col < len(line):
-            self.cursor_col += 1
-        elif self.cursor_row < len(self.input_lines) - 1:
-            self.cursor_row += 1
-            self.cursor_col = 0
+        if self.cursor_col < len(line): self.cursor_col += 1
+        elif self.cursor_row < len(self.input_lines) - 1: self.cursor_row += 1; self.cursor_col = 0
 
     def move_up(self) -> None:
         if self.cursor_row > 0:
-            self.cursor_row -= 1
-            self.cursor_col = min(self.cursor_col, len(self.input_lines[self.cursor_row]))
+            self.cursor_row -= 1; self.cursor_col = min(self.cursor_col, len(self.input_lines[self.cursor_row]))
 
     def move_down(self) -> None:
         if self.cursor_row < len(self.input_lines) - 1:
-            self.cursor_row += 1
-            self.cursor_col = min(self.cursor_col, len(self.input_lines[self.cursor_row]))
+            self.cursor_row += 1; self.cursor_col = min(self.cursor_col, len(self.input_lines[self.cursor_row]))
 
     def clear_input(self) -> None:
-        self.input_lines = [""]
-        self.cursor_row = 0
-        self.cursor_col = 0
-        self.input_scroll = 0
+        self.input_lines = [""]; self.cursor_row = 0; self.cursor_col = 0; self.input_scroll = 0
 
     def current_input(self) -> str:
         return "\n".join(self.input_lines).strip("\n")
-
-    # ---------------------------------------------------------------------
-    # Sending messages
-    # ---------------------------------------------------------------------
 
     def send_current_message(self) -> None:
         message = self.current_input()
@@ -1738,131 +1727,82 @@ class GeminiCursesApp:
             self.status = "empty message ignored"
             self.clear_input()
             return
+        if not message.strip() and self.pending_attachments:
+            message = "Please review the attached file(s)."
 
         user_time = now_time()
         attachment_note = ""
         if self.pending_attachments:
-            attachment_note = "\n" + "\n".join(f"[attached] {att.path} ({att.mime_type}, {att.size} bytes)" for att in self.pending_attachments)
+            attachment_note = "\n[Pending attachments sent: " + ", ".join(p.path.name for p in self.pending_attachments) + "]"
         self.transcript.append(TranscriptItem(self.username, message + attachment_note, user_time))
         append_log(self.session_path, self.username, message + attachment_note, user_time)
+        self.context_buffer.append("User: " + message + attachment_note)
+        self.trim_context_buffer()
         self.clear_input()
         self.transcript_scroll = 0
-
         self.status = "Generating response..."
         self.draw()
 
         context = self.build_context()
         prompt_text = (context + "\n" if context else "") + "User: " + message
-        raw_output = call_gemini(self.cfg, prompt_text, self.pending_attachments, self.attachment_dir, self.session_name)
+        attachments_to_send = list(self.pending_attachments)
+        raw_output = call_gemini(self.cfg, prompt_text, self.session_name, self.attachment_dir, attachments_to_send)
         self.pending_attachments = []
 
         gemini_time = now_time()
         append_log(self.session_path, "Gemini", raw_output, gemini_time)
-        cleaned_output = extract_attachments(raw_output, self.attachment_dir, self.session_name)
-
-        self.context_buffer.append("User: " + message + attachment_note)
+        cleaned_output = extract_code_attachments(raw_output, self.attachment_dir, self.session_name)
         self.context_buffer.append("Assistant: " + cleaned_output)
         self.trim_context_buffer()
         self.save_context_snapshot()
-
         self.transcript.append(TranscriptItem("Gemini", cleaned_output, gemini_time))
         self.status = "response complete"
-        self.transcript_scroll = 0
 
-    # ---------------------------------------------------------------------
+    # ------------------------------------------------------------------
     # Main event loop
-    # ---------------------------------------------------------------------
+    # ------------------------------------------------------------------
 
     def handle_key(self, ch: int) -> None:
-        if ch == curses.KEY_MOUSE:
-            self.handle_mouse()
-            return
-        if ch in (curses.KEY_F10, 17):
-            self.should_quit = True
-            return
-        if ch == curses.KEY_F1:
-            self.show_help()
-            return
-        if ch == curses.KEY_F2:
-            self.open_model_selector()
-            return
-        if ch == curses.KEY_F3:
-            self.open_api_key_manager()
-            return
-        if ch == curses.KEY_F4:
-            self.open_sessions_menu()
-            return
-        if ch == curses.KEY_F5:
-            self.open_options_menu()
-            return
-        if ch == curses.KEY_F6:
-            self.open_memory_menu()
-            return
-        if ch == curses.KEY_F7:
-            self.open_file_menu()
-            return
-        if ch == curses.KEY_F8:
-            self.open_external_editor_for_input()
-            return
-        if ch == curses.KEY_F9:
-            self.show_credits()
-            return
-        if ch == 7:
-            self.send_current_message()
-            return
-        if ch in (10, 13, curses.KEY_ENTER):
-            self.insert_newline()
-        elif ch in (curses.KEY_BACKSPACE, 127, 8):
-            self.backspace()
-        elif ch == curses.KEY_DC:
-            self.delete_forward()
-        elif ch == curses.KEY_LEFT:
-            self.move_left()
-        elif ch == curses.KEY_RIGHT:
-            self.move_right()
-        elif ch == curses.KEY_UP:
-            self.move_up()
-        elif ch == curses.KEY_DOWN:
-            self.move_down()
-        elif ch == curses.KEY_HOME:
-            self.cursor_col = 0
-        elif ch == curses.KEY_END:
-            self.cursor_col = len(self.input_lines[self.cursor_row])
-        elif ch == curses.KEY_PPAGE:
-            self.transcript_scroll += 10
-        elif ch == curses.KEY_NPAGE:
-            self.transcript_scroll = max(0, self.transcript_scroll - 10)
-        elif ch == 21:
-            self.clear_input()
-        elif ch == 12:
-            pass
-        elif ch == 9:
-            self.insert_text("    ")
-        elif 32 <= ch <= 126:
-            self.insert_text(chr(ch))
+        if ch == curses.KEY_MOUSE: self.handle_mouse(); return
+        if ch == curses.KEY_F1: self.open_help(); return
+        if ch == curses.KEY_F2: self.open_model_selector(); return
+        if ch == curses.KEY_F3: self.open_api_key_input(); return
+        if ch == curses.KEY_F4: self.open_session_browser(); return
+        if ch == curses.KEY_F5 or ch == 7: self.send_current_message(); return
+        if ch == curses.KEY_F6: self.open_memory_menu(); return
+        if ch == curses.KEY_F7: self.open_file_menu(); return
+        if ch == curses.KEY_F8: self.open_external_editor_for_input(); return
+        if ch == curses.KEY_F9: self.open_credits(); return
+        if ch in (curses.KEY_F10, 17): self.should_quit = True; return
+        if ch in (10, 13, curses.KEY_ENTER): self.insert_newline()
+        elif ch in (curses.KEY_BACKSPACE, 127, 8): self.backspace()
+        elif ch == curses.KEY_DC: self.delete_forward()
+        elif ch == curses.KEY_LEFT: self.move_left()
+        elif ch == curses.KEY_RIGHT: self.move_right()
+        elif ch == curses.KEY_UP: self.move_up()
+        elif ch == curses.KEY_DOWN: self.move_down()
+        elif ch == curses.KEY_HOME: self.cursor_col = 0
+        elif ch == curses.KEY_END: self.cursor_col = len(self.input_lines[self.cursor_row])
+        elif ch == curses.KEY_PPAGE: self.transcript_scroll += 10
+        elif ch == curses.KEY_NPAGE: self.transcript_scroll = max(0, self.transcript_scroll - 10)
+        elif ch == 21: self.clear_input()
+        elif ch == 12: pass
+        elif ch == 9: self.insert_text("    ")
+        elif 32 <= ch <= 126: self.insert_text(chr(ch))
 
     def run(self, stdscr: curses.window) -> None:
         self.stdscr = stdscr
-        curses.noecho()
-        curses.cbreak()
-        stdscr.keypad(True)
-        try:
-            curses.mousemask(curses.ALL_MOUSE_EVENTS | getattr(curses, "REPORT_MOUSE_POSITION", 0))
-        except curses.error:
-            pass
-
+        curses.noecho(); curses.cbreak(); stdscr.keypad(True)
+        mouse_mask = curses.ALL_MOUSE_EVENTS | getattr(curses, "REPORT_MOUSE_POSITION", 0)
+        try: curses.mousemask(mouse_mask)
+        except curses.error: pass
         self.load_session_into_ui()
-        if not self.cfg.api_key:
-            self.status = "No API key loaded. Press F3."
-        elif not self.cfg.model:
-            self.status = "No MODEL configured. Press F2 to choose/test a model."
-
+        if not self.cfg.api_key: self.status = "No API key loaded. Press F3 to paste one."
+        elif not self.cfg.model: self.status = "No MODEL configured. Press F2 to choose/test one."
         while not self.should_quit:
             self.draw()
-            try:
-                ch = stdscr.getch()
-            except KeyboardInterrupt:
-                break
+            try: ch = stdscr.getch()
+            except KeyboardInterrupt: break
             self.handle_key(ch)
 
 
@@ -1873,48 +1813,43 @@ class GeminiCursesApp:
 
 def main() -> int:
     args = parse_args()
-
     if args.version:
         print(f"{PROGRAM} version {VERSION}")
         return 0
 
     cfg = load_config()
-    session_dir = cfg.session_dir
-    attachment_dir = cfg.effective_attachment_dir
-    session_dir.mkdir(parents=True, exist_ok=True)
-    attachment_dir.mkdir(parents=True, exist_ok=True)
+    cfg.session_dir.mkdir(parents=True, exist_ok=True)
+    cfg.effective_attachment_dir.mkdir(parents=True, exist_ok=True)
 
     if args.list:
-        list_sessions(session_dir)
+        list_sessions(cfg.session_dir)
         return 0
     if args.models:
         return print_models(cfg)
     if args.test_model:
-        return print_test_model(cfg, args.test_model)
+        return print_model_test(cfg, args.test_model)
     if args.resume and args.session_name:
         print("error: use either a session name or --resume, not both", file=sys.stderr)
         return 2
 
     if args.resume:
         session_name = sanitize_session_name(args.resume)
-        session_path = session_dir / f"{session_name}.log"
+        session_path = cfg.session_dir / f"{session_name}.log"
         if not session_path.exists():
             print(f"error: session not found: {session_name}", file=sys.stderr)
             return 1
     elif args.session_name:
         session_name = sanitize_session_name(args.session_name)
-        session_path = session_dir / f"{session_name}.log"
+        session_path = cfg.session_dir / f"{session_name}.log"
     else:
         session_name = default_session_name()
-        session_path = session_dir / f"{session_name}.log"
+        session_path = cfg.session_dir / f"{session_name}.log"
 
     app = GeminiCursesApp(cfg, session_name, session_path)
-
     try:
         curses.wrapper(app.run)
     except KeyboardInterrupt:
         return 0
-
     return 0
 
 
