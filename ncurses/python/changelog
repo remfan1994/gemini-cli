@@ -1,4 +1,32 @@
 # Changelog
+## 0.7.2
+
+### Added
+- Global function-key navigation coverage for additional modal screens
+- Function-key jumping from API-key, yes/no, text-input, editor, and message workflows
+- External editor selection menu opened by F8
+- Detection of common terminal editors such as vim, vi, nano, pico, micro, emacs, mg, joe, and jed
+- Manual editor command/path entry
+- Browse-for-editor executable workflow
+- Optional EDITOR config saving from editor workflow
+- More explicit comments documenting editor selection and global navigation behavior
+
+### Changed
+- F8 now opens an editor menu rather than immediately launching the configured editor
+- Text-entry and confirmation dialogs no longer trap users away from the function-key feature screens
+- The editor workflow is now more mutt-like and easier for end users who do not know their editor path
+- Man page now documents global function-key navigation behavior
+
+### Documentation
+- Added GLOBAL FUNCTION-KEY NAVIGATION section to man page
+- Added EDITOR MENU section to man page
+- Updated F8 control description
+- Expanded code comments around editor detection and browse behavior
+
+### Notes
+- Global function-key jumping remains intentionally disabled for the currently open feature key itself to avoid recursive redraw loops.
+- Drag selection remains the terminal emulator's job; this update does not change terminal text-selection behavior.
+
 ## 0.7.1
 
 ### Added
