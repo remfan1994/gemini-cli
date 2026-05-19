@@ -1,0 +1,493 @@
+#!/usr/bin/env bash
+
+# ==========================================================
+# gemini-cli bash-only edition
+# ----------------------------------------------------------
+# Dependency-light Bash client for gemini-terminal-tools.
+#
+# VERSION
+#   0.1.0
+#
+# PURPOSE
+#   This edition is for systems that can run curl over HTTPS but should not
+#   need Python. It is not a developer example and it is not intended to be a
+#   toy curl wrapper. It is an end-user terminal chat client with sessions,
+#   config, model discovery, model testing, context memory, logs, and basic
+#   attachment support.
+#
+# REQUIRED TOOLS
+#   bash, curl, awk, sed, grep, tr, mktemp, base64
+#
+# OPTIONAL TOOL
+#   jq
+#
+# WHY JQ IS OPTIONAL
+#   Gemini speaks JSON. Bash can assemble simple JSON, but JSON parsing is a
+#   poor fit for shell. If jq is installed, this edition uses it for safer
+#   model parsing and response extraction. If jq is missing, the script falls
+#   back to best-effort sed/awk parsing so older or smaller machines can still
+#   use the client.
+#
+# PROJECT POSTURE
+#   The goal is not to reduce features to a one-shot curl command. The goal is
+#   to keep dependencies light while preserving a usable terminal chat client.
+# ==========================================================
+
+set -o pipefail
+
+PROGRAM="gemini-cli"
+VERSION="0.1.0"
+EDITION="bash-only"
+
+CONFIG_DIR="${HOME}/.config/gemini-cli"
+CONFIG_FILE="${CONFIG_DIR}/config"
+CACHE_DIR="${HOME}/.cache/gemini-cli"
+MODEL_CACHE_FILE="${CACHE_DIR}/models.json"
+
+SESSION_DIR="${HOME}/.gpt"
+ATTACHMENT_DIR=""
+ATTACHMENT_DIR_CONFIGURED=0
+
+FALLBACK_MODEL="gemini-2.5-flash"
+MODEL=""
+CONTEXT_TURNS=12
+CONTEXT_TURNS_EXPLICIT=0
+MODEL_TEST_PROMPT="Please reply with a short sentence confirming this model is available for text generation."
+STARTUP_NOTICE=1
+PROJECT_LEAD_NAME="remfan1994"
+PROJECT_LEAD_NOTICE="I strongly encourage everyone to get cruetly-free VEGETARIAN food and remember the 'bloodguilt' curse from the Bible.  -Project Lead, remfan1994"
+MAX_ATTACHMENT_BYTES=1048576
+
+MODEL_FILTER_GENERATE_CONTENT=1
+MODEL_FILTER_REQUIRE_TOKENS=0
+MODEL_FILTER_HIDE_PREVIEW=0
+MODEL_MIN_INPUT_TOKENS=0
+MODEL_MIN_OUTPUT_TOKENS=0
+MODEL_SORT_ORDER="api"
+
+USER_NAME="$(whoami 2>/dev/null || printf '%s' user)"
+CONTEXT_BUFFER=()
+PENDING_ATTACHMENTS=()
+
+# ==========================================================
+# Basic helpers
+# ==========================================================
+
+timestamp() { date +"%H:%M:%S"; }
+
+trim() { printf '%s' "$1" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'; }
+
+truthy() {
+  case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
+    1|yes|y|true|on) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+need_basic_tools() {
+  local missing=""
+  for tool in curl awk sed grep tr mktemp base64; do
+    if ! have "$tool"; then missing="$missing $tool"; fi
+  done
+  if [ -n "$missing" ]; then
+    printf 'ERROR: missing required tools:%s\n' "$missing" >&2
+    exit 1
+  fi
+}
+
+normalize_model_id() {
+  case "$1" in
+    models/*) printf '%s\n' "${1#models/}" ;;
+    *) printf '%s\n' "$1" ;;
+  esac
+}
+
+effective_model() { if [ -n "$MODEL" ]; then normalize_model_id "$MODEL"; else printf '%s\n' "$FALLBACK_MODEL"; fi; }
+model_label() { if [ -n "$MODEL" ]; then normalize_model_id "$MODEL"; else printf '%s (fallback; no MODEL configured)\n' "$FALLBACK_MODEL"; fi; }
+
+sanitize_session_name() {
+  printf '%s' "$1" | sed 's/[^A-Za-z0-9._-]/_/g; s/^[._-]*//; s/[._-]*$//' | awk '{ if ($0 == "") print "session"; else print }'
+}
+
+urlencode_key_query() { printf 'key=%s' "$GEMINI_API_KEY"; }
+
+json_escape_stream() {
+  # Escape JSON string syntax without Python or jq. This is suitable for text
+  # prompts and human-readable logs. The full bash/python3 edition is more
+  # robust for arbitrary Unicode and deeply nested JSON handling.
+  awk '
+    BEGIN { first = 1 }
+    {
+      gsub(/\\/, "\\\\")
+      gsub(/\"/, "\\\"")
+      gsub(/\r/, "")
+      gsub(/\t/, "\\t")
+      if (!first) printf "\\n"
+      printf "%s", $0
+      first = 0
+    }
+  '
+}
+
+json_escape_value() { printf '%s' "$1" | json_escape_stream; }
+
+positive_int_or_default() {
+  case "$1" in ''|*[!0-9]*) printf '%s\n' "$2" ;; *) if [ "$1" -lt 1 ]; then printf '%s\n' "$2"; else printf '%s\n' "$1"; fi ;; esac
+}
+
+# ==========================================================
+# Config loading/writing
+# ==========================================================
+
+load_config() {
+  if [ -f "$CONFIG_FILE" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      line="$(trim "$line")"
+      case "$line" in ''|\#*) continue ;; esac
+      case "$line" in *=*) key="$(trim "${line%%=*}")"; value="$(trim "${line#*=}")" ;; *) continue ;; esac
+      case "$key" in
+        MODEL) MODEL="$(normalize_model_id "$value")" ;;
+        CONTEXT_TURNS) CONTEXT_TURNS="$value"; CONTEXT_TURNS_EXPLICIT=1 ;;
+        HISTORY_LIMIT) [ "$CONTEXT_TURNS_EXPLICIT" -eq 0 ] && CONTEXT_TURNS="$value" ;;
+        GEMINI_API_KEY) GEMINI_API_KEY="${GEMINI_API_KEY:-$value}" ;;
+        SESSION_DIR) SESSION_DIR="${value/#\~/$HOME}" ;;
+        ATTACHMENT_DIR) ATTACHMENT_DIR="${value/#\~/$HOME}"; ATTACHMENT_DIR_CONFIGURED=1 ;;
+        MODEL_TEST_PROMPT) [ -n "$value" ] && MODEL_TEST_PROMPT="$value" ;;
+        STARTUP_NOTICE) STARTUP_NOTICE="$value" ;;
+        MAX_ATTACHMENT_BYTES) MAX_ATTACHMENT_BYTES="$value" ;;
+        MODEL_CACHE_FILE) MODEL_CACHE_FILE="${value/#\~/$HOME}" ;;
+        MODEL_FILTER_GENERATE_CONTENT) MODEL_FILTER_GENERATE_CONTENT="$value" ;;
+        MODEL_FILTER_REQUIRE_TOKENS) MODEL_FILTER_REQUIRE_TOKENS="$value" ;;
+        MODEL_FILTER_HIDE_PREVIEW) MODEL_FILTER_HIDE_PREVIEW="$value" ;;
+        MODEL_MIN_INPUT_TOKENS) MODEL_MIN_INPUT_TOKENS="$value" ;;
+        MODEL_MIN_OUTPUT_TOKENS) MODEL_MIN_OUTPUT_TOKENS="$value" ;;
+        MODEL_SORT_ORDER) MODEL_SORT_ORDER="$value" ;;
+      esac
+    done < "$CONFIG_FILE"
+  fi
+  CONTEXT_TURNS="$(positive_int_or_default "$CONTEXT_TURNS" 12)"
+  MAX_ATTACHMENT_BYTES="$(positive_int_or_default "$MAX_ATTACHMENT_BYTES" 1048576)"
+  MODEL_MIN_INPUT_TOKENS="$(positive_int_or_default "$MODEL_MIN_INPUT_TOKENS" 0)"
+  MODEL_MIN_OUTPUT_TOKENS="$(positive_int_or_default "$MODEL_MIN_OUTPUT_TOKENS" 0)"
+  [ "$ATTACHMENT_DIR_CONFIGURED" -eq 0 ] && ATTACHMENT_DIR="$SESSION_DIR/attachments"
+  mkdir -p "$CONFIG_DIR" "$CACHE_DIR" "$SESSION_DIR" "$ATTACHMENT_DIR"
+}
+
+set_config_value() {
+  local key="$1" value="$2" tmp
+  mkdir -p "$CONFIG_DIR"
+  tmp="$(mktemp "${CONFIG_FILE}.tmp.XXXXXX")"
+  if [ -f "$CONFIG_FILE" ]; then
+    awk -v k="$key" -v v="$value" 'BEGIN{done=0} $0 ~ "^" k "=" {print k "=" v; done=1; next} {print} END{if(!done) print k "=" v}' "$CONFIG_FILE" > "$tmp"
+  else
+    printf '%s=%s\n' "$key" "$value" > "$tmp"
+  fi
+  mv "$tmp" "$CONFIG_FILE"
+  chmod 600 "$CONFIG_FILE" 2>/dev/null || true
+}
+
+unset_config_value() {
+  local key="$1" tmp
+  [ -f "$CONFIG_FILE" ] || return 0
+  tmp="$(mktemp "${CONFIG_FILE}.tmp.XXXXXX")"
+  awk -v k="$key" '$0 !~ "^" k "=" { print }' "$CONFIG_FILE" > "$tmp"
+  mv "$tmp" "$CONFIG_FILE"
+}
+
+require_api_key() {
+  if [ -z "$GEMINI_API_KEY" ]; then
+    printf 'ERROR: GEMINI_API_KEY not set.\n\n' >&2
+    printf 'Use: export GEMINI_API_KEY=your_key\n' >&2
+    printf 'Or:  %s --set-api-key\n' "$PROGRAM" >&2
+    return 1
+  fi
+}
+
+# ==========================================================
+# Help/version/credits
+# ==========================================================
+
+version() { printf '%s %s version %s\n' "$PROGRAM" "$EDITION" "$VERSION"; }
+
+credits() {
+  cat <<'CREDITS_EOF'
+gemini-cli (bash-only)
+Project: gemini-terminal-tools
+GitHub: https://github.com/remfan1994/gemini-terminal-tools
+
+I strongly encourage everyone to get cruetly-free VEGETARIAN food and remember the 'bloodguilt' curse from the Bible.  -Project Lead, remfan1994
+CREDITS_EOF
+}
+
+help_menu() {
+  cat <<HELP_EOF
+$PROGRAM ($EDITION) - dependency-light terminal Gemini chat client
+
+USAGE
+    $PROGRAM [session]
+    $PROGRAM --resume SESSION
+    $PROGRAM --models
+    $PROGRAM --update-models
+    $PROGRAM --select-model
+    $PROGRAM --test-model MODEL
+    $PROGRAM --attach FILE [session]
+    $PROGRAM --set-api-key
+    $PROGRAM --config
+
+CHAT
+    Type/paste a message, then press Ctrl+D to send.
+
+MODEL WORKFLOW
+    $PROGRAM --update-models       fetch model list from Google and cache it
+    $PROGRAM --models              show cached/available models
+    $PROGRAM --select-model        choose model from a numbered list
+    $PROGRAM --test-model MODEL    test one selected model
+
+CONFIG
+    $CONFIG_FILE
+
+COMMON CONFIG KEYS
+    MODEL, CONTEXT_TURNS, GEMINI_API_KEY, SESSION_DIR, ATTACHMENT_DIR,
+    MODEL_TEST_PROMPT, STARTUP_NOTICE, MAX_ATTACHMENT_BYTES
+
+NOTES
+    This edition avoids Python. If jq is installed, JSON parsing is stronger.
+    Without jq, the script uses best-effort awk/sed parsing.
+HELP_EOF
+}
+
+# ==========================================================
+# Model cache and parsing
+# ==========================================================
+
+fetch_models_live() {
+  require_api_key || return 1
+  mkdir -p "$(dirname "$MODEL_CACHE_FILE")"
+  curl -sS --max-time 60 "https://generativelanguage.googleapis.com/v1beta/models?$(urlencode_key_query)&pageSize=100" -o "$MODEL_CACHE_FILE"
+}
+
+models_source() {
+  if [ -f "$MODEL_CACHE_FILE" ]; then cat "$MODEL_CACHE_FILE"; else fetch_models_live >/dev/null && cat "$MODEL_CACHE_FILE"; fi
+}
+
+models_table() {
+  # Output TSV: model_id display input output methods
+  if have jq; then
+    jq -r '.models[]? | [(.name|sub("^models/";"")), (.displayName // (.name|sub("^models/";""))), (.inputTokenLimit // 0), (.outputTokenLimit // 0), ((.supportedGenerationMethods // [])|join(","))] | @tsv'
+    return
+  fi
+  # Best-effort no-jq fallback: extract model names, but not all metadata.
+  grep -o '"name"[[:space:]]*:[[:space:]]*"models/[^"]*"' | sed 's/.*"models\///; s/"$//' | awk '{ print $0 "\t" $0 "\t0\t0\tunknown" }'
+}
+
+filtered_models_table() {
+  models_source | models_table | awk -F '\t' \
+    -v gen="$MODEL_FILTER_GENERATE_CONTENT" \
+    -v req="$MODEL_FILTER_REQUIRE_TOKENS" \
+    -v hide="$MODEL_FILTER_HIDE_PREVIEW" \
+    -v minin="$MODEL_MIN_INPUT_TOKENS" \
+    -v minout="$MODEL_MIN_OUTPUT_TOKENS" '
+      function truthy(v){ return v=="1" || v=="yes" || v=="true" || v=="on" }
+      {
+        model=$1; display=$2; input=$3+0; output=$4+0; methods=$5
+        if (truthy(gen) && methods != "unknown" && index(methods, "generateContent") == 0) next
+        if (truthy(req) && (input <= 0 || output <= 0)) next
+        if (truthy(hide) && (index(tolower(model), "preview") || index(tolower(model), "experimental") || index(tolower(model), "exp"))) next
+        if (input < minin) next
+        if (output < minout) next
+        print
+      }
+    ' | case "$MODEL_SORT_ORDER" in
+          model) sort -t $'\t' -k1,1 ;;
+          input-desc) sort -t $'\t' -k3,3nr ;;
+          output-desc) sort -t $'\t' -k4,4nr ;;
+          *) cat ;;
+        esac
+}
+
+print_models() { filtered_models_table | awk -F '\t' '{ printf "%s\t%s\tinput:%s\toutput:%s\t%s\n", $1, $2, $3, $4, $5 }'; }
+
+# ==========================================================
+# Gemini request/response
+# ==========================================================
+
+mime_for_file() {
+  case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
+    *.txt|*.md|*.log|*.csv|*.json|*.xml|*.html|*.css|*.js|*.sh|*.c|*.h|*.py) printf 'text/plain' ;;
+    *.png) printf 'image/png' ;;
+    *.jpg|*.jpeg) printf 'image/jpeg' ;;
+    *.gif) printf 'image/gif' ;;
+    *.webp) printf 'image/webp' ;;
+    *.pdf) printf 'application/pdf' ;;
+    *.mp3) printf 'audio/mpeg' ;;
+    *.wav) printf 'audio/wav' ;;
+    *.mp4) printf 'video/mp4' ;;
+    *) printf 'application/octet-stream' ;;
+  esac
+}
+
+base64_one_line() { if base64 --help 2>&1 | grep -q -- '-w'; then base64 -w 0 "$1"; else base64 "$1" | tr -d '\n'; fi; }
+
+build_parts_json() {
+  local prompt="$1" file mime escaped_prompt b64 size
+  escaped_prompt="$(printf '%s' "$prompt" | json_escape_stream)"
+  printf '[{"text":"%s"}' "$escaped_prompt"
+  for file in "${PENDING_ATTACHMENTS[@]}"; do
+    [ -f "$file" ] || continue
+    size=$(wc -c < "$file" | tr -d ' ')
+    if [ "$size" -gt "$MAX_ATTACHMENT_BYTES" ]; then
+      printf ',{"text":"[attachment skipped: %s exceeds MAX_ATTACHMENT_BYTES]"}' "$(json_escape_value "$file")"
+      continue
+    fi
+    mime="$(mime_for_file "$file")"
+    if printf '%s' "$mime" | grep -q '^text/'; then
+      printf ',{"text":"Attached file: %s\n%s"}' "$(json_escape_value "$file")" "$(cat "$file" | json_escape_stream)"
+    else
+      b64="$(base64_one_line "$file")"
+      printf ',{"inlineData":{"mimeType":"%s","data":"%s"}}' "$mime" "$b64"
+    fi
+  done
+  printf ']'
+}
+
+call_model() {
+  local model="$1" prompt="$2" parts payload url response status
+  require_api_key || return 1
+  parts="$(build_parts_json "$prompt")"
+  payload="{\"contents\":[{\"parts\":$parts}]}"
+  url="https://generativelanguage.googleapis.com/v1beta/models/$(normalize_model_id "$model"):generateContent?$(urlencode_key_query)"
+  response="$(printf '%s' "$payload" | curl -sS --max-time 120 -H 'Content-Type: application/json' -d @- "$url" 2>&1)"
+  status=$?
+  if [ "$status" -ne 0 ]; then printf 'curl error: %s\n' "$response"; return 1; fi
+  extract_response_text "$response"
+}
+
+extract_response_text() {
+  if have jq; then
+    printf '%s' "$1" | jq -r '[.candidates[0].content.parts[]? | .text? // empty] | join("\n")'
+    return
+  fi
+  printf '%s' "$1" | sed -n 's/.*"text"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | sed 's/\\n/\
+/g; s/\\"/"/g; s/\\\\/\\/g' | head -1
+}
+
+# ==========================================================
+# Sessions and memory
+# ==========================================================
+
+resolve_session_path() { printf '%s/%s.log\n' "$SESSION_DIR" "$1"; }
+list_sessions() { for p in "$SESSION_DIR"/*.log; do [ -e "$p" ] && basename "$p" .log; done; }
+add_context() { CONTEXT_BUFFER+=("$1"); trim_context; }
+trim_context() { local max=$((CONTEXT_TURNS * 2)); while [ "${#CONTEXT_BUFFER[@]}" -gt "$max" ]; do CONTEXT_BUFFER=("${CONTEXT_BUFFER[@]:1}"); done; }
+build_context() { local out="" item; for item in "${CONTEXT_BUFFER[@]}"; do [ -n "$out" ] && out="$out
+"; out="$out$item"; done; printf '%s' "$out"; }
+write_snapshot() { local ts item; ts="$(timestamp)"; printf '[%s] system: CONTEXT_BEGIN\n' "$ts" >> "$SESSION"; for item in "${CONTEXT_BUFFER[@]}"; do printf '%s\n' "$item" >> "$SESSION"; done; printf '[%s] system: CONTEXT_END\n' "$ts" >> "$SESSION"; }
+load_context() { [ -f "$SESSION" ] || return 0; mapfile -t CONTEXT_BUFFER < <(grep -E '^\[[0-9:]+\] (Gemini|[^:]+): ' "$SESSION" | tail -n $((CONTEXT_TURNS * 2)) | sed -E 's/^\[[0-9:]+\] Gemini: /Assistant: /; s/^\[[0-9:]+\] [^:]+: /User: /'); }
+
+# ==========================================================
+# Commands
+# ==========================================================
+
+set_api_key() { printf 'Paste Gemini API key: '; IFS= read -r -s key; printf '\n'; [ -n "$key" ] && set_config_value GEMINI_API_KEY "$key"; }
+config_summary() { cat "$CONFIG_FILE" 2>/dev/null || true; }
+test_model() { local model="$1"; [ -z "$model" ] && { printf 'ERROR: model id required\n' >&2; return 2; }; call_model "$model" "$MODEL_TEST_PROMPT"; }
+select_model() {
+  local lines choice selected model ans line display input output methods i
+  mapfile -t lines < <(filtered_models_table)
+  [ "${#lines[@]}" -eq 0 ] && { printf 'No models available. Try --update-models.\n'; return 1; }
+  i=1
+  for line in "${lines[@]}"; do IFS=$'\t' read -r model display input output methods <<< "$line"; printf '%3d) %s - %s (input:%s output:%s)\n' "$i" "$model" "$display" "$input" "$output"; i=$((i+1)); done
+  printf 'Select model number: '; IFS= read -r choice
+  case "$choice" in ''|*[!0-9]*) printf 'Invalid selection.\n'; return 1 ;; esac
+  [ "$choice" -lt 1 ] || [ "$choice" -gt "${#lines[@]}" ] && { printf 'Out of range.\n'; return 1; }
+  selected="${lines[$((choice-1))]}"; IFS=$'\t' read -r model _ <<< "$selected"
+  printf 'Test model now? [Y/n] '; IFS= read -r ans; case "$ans" in n|N|no|NO) ;; *) test_model "$model" ;; esac
+  printf 'Save MODEL=%s? [y/N] ' "$model"; IFS= read -r ans; case "$ans" in y|Y|yes|YES) set_config_value MODEL "$model"; printf 'Saved.\n' ;; esac
+}
+
+# ==========================================================
+# Argument parsing
+# ==========================================================
+
+ACTION=chat; SESSION_NAME=""; RESUME=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -h|--help|help) ACTION=help ;;
+    --version) ACTION=version ;;
+    --credits) ACTION=credits ;;
+    --config) ACTION=config ;;
+    --set) ACTION=set; SET_KEY="${2:-}"; SET_VALUE="${3:-}"; shift 2 ;;
+    --unset) ACTION=unset; UNSET_KEY="${2:-}"; shift ;;
+    --set-api-key) ACTION=set-api-key ;;
+    --forget-api-key) ACTION=forget-api-key ;;
+    --list) ACTION=list ;;
+    --models) ACTION=models ;;
+    --update-models) ACTION=update-models ;;
+    --select-model) ACTION=select-model ;;
+    --test-model) ACTION=test-model; TEST_MODEL="${2:-}"; shift ;;
+    --attach) shift; [ -n "${1:-}" ] && PENDING_ATTACHMENTS+=("$1") ;;
+    --resume) RESUME=1; shift; SESSION_NAME="${1:-}" ;;
+    --) shift; break ;;
+    -*) printf 'ERROR: unknown option %s\n' "$1" >&2; exit 2 ;;
+    *) [ -z "$SESSION_NAME" ] && SESSION_NAME="$1" || { printf 'ERROR: unexpected argument %s\n' "$1" >&2; exit 2; } ;;
+  esac
+  shift
+done
+
+need_basic_tools
+load_config
+
+case "$ACTION" in
+  help) help_menu; exit 0 ;;
+  version) version; exit 0 ;;
+  credits) credits; exit 0 ;;
+  config) config_summary; exit 0 ;;
+  set) [ -n "$SET_KEY" ] || exit 2; set_config_value "$SET_KEY" "$SET_VALUE"; exit 0 ;;
+  unset) [ -n "$UNSET_KEY" ] || exit 2; unset_config_value "$UNSET_KEY"; exit 0 ;;
+  set-api-key) set_api_key; exit $? ;;
+  forget-api-key) unset_config_value GEMINI_API_KEY; exit 0 ;;
+  list) list_sessions; exit 0 ;;
+  update-models) fetch_models_live && printf 'Updated model cache: %s\n' "$MODEL_CACHE_FILE"; exit $? ;;
+  models) print_models; exit $? ;;
+  select-model) select_model; exit $? ;;
+  test-model) test_model "$TEST_MODEL"; exit $? ;;
+esac
+
+require_api_key || exit 1
+[ -z "$SESSION_NAME" ] && SESSION_NAME="session-$(date +%Y-%m-%d-%H-%M-%S)" || SESSION_NAME="$(sanitize_session_name "$SESSION_NAME")"
+SESSION="$(resolve_session_path "$SESSION_NAME")"
+[ "$RESUME" -eq 1 ] && [ ! -f "$SESSION" ] && { printf 'ERROR: session not found\n' >&2; exit 1; }
+load_context
+ACTIVE_MODEL="$(effective_model)"
+SESSION_EMPTY=1; [ -s "$SESSION" ] && SESSION_EMPTY=0
+
+printf '%s (%s)\n' "$PROGRAM" "$EDITION"
+printf 'session: %s\n' "$SESSION"
+printf 'model: %s\n' "$(model_label)"
+printf 'Ctrl+D to send, Ctrl+C to exit\n\n'
+if truthy "$STARTUP_NOTICE" && [ "$SESSION_EMPTY" -eq 1 ]; then
+  printf '[%s] %s: %s\n\n' "$(timestamp)" "$PROJECT_LEAD_NAME" "$PROJECT_LEAD_NOTICE"
+  printf '[%s] system: This is the message list window. The notice above will disappear when you start chatting, and messages to and from Gemini will appear here.\n\n' "$(timestamp)"
+fi
+
+while true; do
+  TS="$(timestamp)"
+  printf '[%s] %s> ' "$TS" "$USER_NAME"
+  buffer="$(cat)"
+  [ -z "$buffer" ] && continue
+  printf '[%s] %s: %s\n' "$TS" "$USER_NAME" "$buffer" >> "$SESSION"
+  add_context "User: $buffer"
+  prompt="$(build_context)"
+  printf '\n________________________________________\nEND INPUT\n________________________________________\n'
+  printf '[%s] Generating response...\n' "$(timestamp)"
+  printf '________________________________________\nBEGIN OUTPUT\n________________________________________\n\n'
+  output="$(call_model "$ACTIVE_MODEL" "$prompt")" || output="(response error: $output)"
+  [ -z "$output" ] && output="(empty response or API error)"
+  printf '[%s] Gemini: %s\n' "$(timestamp)" "$output" >> "$SESSION"
+  add_context "Assistant: $output"
+  write_snapshot
+  printf '%s\n\n' "$output"
+  PENDING_ATTACHMENTS=()
+done
