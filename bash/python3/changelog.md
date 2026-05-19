@@ -1,4 +1,19 @@
 # Changelog
+## 2.7
+
+### Added
+- Explicit Bash/python3 edition positioning in script comments and documentation
+- Clarification that Python 3 helpers are used for JSON, URL, attachment, and log parsing
+- Repository layout support for bash/python3 alongside bash/bash-only
+
+### Changed
+- Version bumped to 2.7 for the reorganized Bash/python3 track
+- Documentation now distinguishes Bash/python3 from the new Bash-only dependency-light track
+
+### Notes
+- Bash remains the user-facing orchestration layer in this edition.
+- Python 3 helper snippets are intentionally retained because they improve JSON correctness and reliability.
+
 ## 2.6
 
 ### Added
