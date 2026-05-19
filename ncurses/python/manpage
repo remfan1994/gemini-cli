@@ -138,7 +138,9 @@ CONTROLS
         Open file/attachment menu.
 
     F8
-        Edit current prompt in external editor.
+        Open the external editor menu for the current prompt. The menu can
+        detect common terminal editors, accept a manually typed command, or
+        browse for an executable path.
 
     F9
         Show credits/about screen.
@@ -470,6 +472,16 @@ MEMORY MODEL
     F6 opens the memory menu. The memory menu can view, edit, clear, or rebuild
     current memory.
 
+EDITOR MENU
+    F8 opens an editor menu rather than immediately launching a command.
+
+    The editor menu can detect common editors such as vim, vi, nano, pico,
+    micro, emacs, and similar terminal editors. It can also accept a manually
+    typed editor command or browse common executable directories for a command.
+
+    The chosen editor is used for the current edit action. The EDITOR config
+    key can be saved from the options workflow.
+
 EXTERNAL EDITOR
     F8 opens the current prompt in an external editor.
 
@@ -498,7 +510,7 @@ LIMITATIONS
     - Generated image/video support depends on response parts returned by the model
 
 VERSION
-    gemini-curses version 0.7.1
+    gemini-curses version 0.7.2
 
 AUTHOR
     Part of the gemini-terminal-tools project.
