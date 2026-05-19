@@ -1,4 +1,30 @@
 # Changelog
+## 0.8.1
+
+### Added
+- `--doctor` diagnostics command
+- Diagnostics / doctor screen accessible from the F1 command menu with `D`
+- Runtime checks for Python version, curses import, platform, TERM, terminal size, API-key presence, writable session directory, writable attachment directory, writable model-cache directory, config visibility, model-cache state, editor resolution, and DNS resolution
+- Doctor report lines designed for both shell output and ncurses display
+- Doctor report assurance that API-key values are never printed
+- Doctor comments explaining its role as a stabilization feature and reference behavior for the future C ncurses implementation
+
+### Changed
+- Version bumped to `0.8.1`
+- F1 command menu now includes diagnostics as an actionable command
+- Man page now documents diagnostics and the `--doctor` command
+
+### Documentation
+- Added DIAGNOSTICS section to man page
+- Expanded configuration and model-cache documentation in man page
+- Clarified that `--doctor` does not call `generateContent`
+- Clarified that `--doctor` does not update the model cache
+
+### Notes
+- This is a stabilization-oriented release.
+- The doctor feature is intended to reduce confusion between application bugs and local environment problems.
+- The future C ncurses implementation should preserve an equivalent diagnostics workflow.
+
 ## 0.8.0
 
 ### Added
