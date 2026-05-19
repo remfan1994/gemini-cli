@@ -1,22 +1,20 @@
 #!/usr/bin/env bash
 
 # ==========================================================
-# gemini-cli
+# gemini-terminal-python3
 # ----------------------------------------------------------
-# Bash/python3 terminal Gemini AI interface.
+# Bash + Python 3 helper terminal Gemini AI interface.
 #
 # VERSION
-#   2.7
+#   2.8
 #
 # DESIGN ROLE
-#   This Bash/python3 edition is the practical line-oriented shell
-#   implementation of gemini-terminal-tools. It uses Python 3 helper snippets
-#   for JSON, URL, attachment, and log parsing tasks that are fragile in pure
-#   shell, while Bash remains the user-facing orchestration layer. It stays scriptable and readable while keeping
+#   This Bash edition is the lightweight, line-oriented version of
+#   gemini-terminal-tools. It stays scriptable and readable while keeping
 #   capability parity with the ncurses edition where the feature makes sense
 #   in a command-line interface.
 #
-# CURRENT TRACK
+# NEW IN 2.6
 #   - Cached Gemini model list support
 #   - --update-models
 #   - --models uses cache when available
@@ -28,6 +26,8 @@
 #   - --show-memory / --edit-memory / --clear-memory
 #   - --editor-prompt
 #   - --attach FILE for prompt attachments
+#   - Direct --models filter/sort flags
+#   - Google Gemini help links in built-in help
 #   - --credits
 #
 # OPTIONS PARITY NOTE
@@ -47,10 +47,37 @@
 #   press Ctrl+D to submit it.
 # ==========================================================
 
+
+# ==========================================================
+# MAINTAINER COMMENTARY: WHY THIS FILE EXISTS
+# ----------------------------------------------------------
+# This is the Bash interface that intentionally uses Python 3 helper snippets.
+# It is not the same thing as the bash-only edition.  The point of this edition
+# is practical reliability: Bash orchestrates the workflow, while Python 3 does
+# the parts that shell is historically bad at, especially JSON generation,
+# JSON parsing, URL/path handling, attachment extraction, and log/context
+# parsing.  This keeps the interface scriptable and terminal-native without
+# forcing maintainers to maintain unsafe sed/awk JSON hacks for every edge case.
+#
+# Future maintainers should view this file as the "full shell client" track.
+# It should stay line-oriented and avoid ncurses-style UI ambitions, but it may
+# still provide serious capabilities: sessions, model cache/filtering, context
+# memory, attachment extraction, model testing, and config management.
+#
+# Whenever a feature is added here, ask three questions:
+#   1. Does it still make sense as a command-line action rather than a screen?
+#   2. Does the bash-only edition need a reduced-dependency equivalent?
+#   3. Does the ncurses implementation need equivalent behavior in its UI?
+#
+# This commentary is intentionally long because the project is intended to be
+# forked, repaired, and carried forward by people who were not present for the
+# original design conversations.
+# ==========================================================
+
 set -o pipefail
 
-PROGRAM="gemini-cli"
-VERSION="2.7"
+PROGRAM="gemini-terminal-python3"
+VERSION="2.8"
 
 CONFIG_DIR="$HOME/.config/gemini-cli"
 CONFIG_FILE="$CONFIG_DIR/config"
@@ -102,14 +129,35 @@ EDITOR_PROMPT=0
 # SMALL UTILITY FUNCTIONS
 # ==========================================================
 
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function timestamp
+# Central timestamp helper used in prompts, logs, and visible status output.
+# Keep the format stable because log parsers depend on it.
+# ----------------------------------------------------------
 timestamp() { date +"%H:%M:%S"; }
 
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function trim
+# Whitespace normalizer for config parsing. The config format is simple on
+# purpose so all project editions can share it.
+# ----------------------------------------------------------
 trim() { printf '%s' "$1" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'; }
 
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function expand_path
+# Uses Python 3 because path expansion needs to be predictable across
+# shells. This is one of the places where the python3 edition deliberately
+# buys reliability.
+# ----------------------------------------------------------
 expand_path() {
   python3 -c 'import os, sys; print(os.path.abspath(os.path.expandvars(os.path.expanduser(sys.argv[1]))))' "$1"
 }
 
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function normalize_model_id
+# Allows both models/name and name forms. Google may return names with a
+# models/ prefix while users often configure the shorter form.
+# ----------------------------------------------------------
 normalize_model_id() {
   case "$1" in
     models/*) printf '%s\n' "${1#models/}" ;;
@@ -117,22 +165,52 @@ normalize_model_id() {
   esac
 }
 
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function quote_url_component
+# quote_url_component is a named maintenance unit. Keep behavior stable,
+# check call sites before changing it, and update man pages/help/comments
+# when behavior changes.
+# ----------------------------------------------------------
 quote_url_component() {
   python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$1"
 }
 
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function api_key_query
+# api_key_query is a named maintenance unit. Keep behavior stable, check
+# call sites before changing it, and update man pages/help/comments when
+# behavior changes.
+# ----------------------------------------------------------
 api_key_query() {
   python3 -c 'import sys, urllib.parse; print(urllib.parse.urlencode({"key": sys.argv[1]}))' "$GEMINI_API_KEY"
 }
 
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function models_query
+# models_query is a named maintenance unit. Keep behavior stable, check call
+# sites before changing it, and update man pages/help/comments when behavior
+# changes.
+# ----------------------------------------------------------
 models_query() {
   python3 -c 'import sys, urllib.parse; print(urllib.parse.urlencode({"key": sys.argv[1], "pageSize": "100"}))' "$GEMINI_API_KEY"
 }
 
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function effective_model
+# effective_model is a named maintenance unit. Keep behavior stable, check
+# call sites before changing it, and update man pages/help/comments when
+# behavior changes.
+# ----------------------------------------------------------
 effective_model() {
   if [ -n "$MODEL" ]; then normalize_model_id "$MODEL"; else printf '%s\n' "$FALLBACK_MODEL"; fi
 }
 
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function model_label
+# model_label is a named maintenance unit. Keep behavior stable, check call
+# sites before changing it, and update man pages/help/comments when behavior
+# changes.
+# ----------------------------------------------------------
 model_label() {
   if [ -n "$MODEL" ]; then
     printf '%s\n' "$(normalize_model_id "$MODEL")"
@@ -141,6 +219,12 @@ model_label() {
   fi
 }
 
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function sanitize_session_name
+# sanitize_session_name is a named maintenance unit. Keep behavior stable,
+# check call sites before changing it, and update man pages/help/comments
+# when behavior changes.
+# ----------------------------------------------------------
 sanitize_session_name() {
   python3 -c '
 import re, sys
@@ -150,6 +234,12 @@ print(name or "session")
 ' "$1"
 }
 
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function positive_int_or_default
+# positive_int_or_default is a named maintenance unit. Keep behavior stable,
+# check call sites before changing it, and update man pages/help/comments
+# when behavior changes.
+# ----------------------------------------------------------
 positive_int_or_default() {
   local value="$1" fallback="$2"
   case "$value" in
@@ -158,6 +248,12 @@ positive_int_or_default() {
   esac
 }
 
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function truthy
+# truthy is a named maintenance unit. Keep behavior stable, check call sites
+# before changing it, and update man pages/help/comments when behavior
+# changes.
+# ----------------------------------------------------------
 truthy() {
   case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
     1|yes|y|true|on) return 0 ;;
@@ -165,8 +261,20 @@ truthy() {
   esac
 }
 
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function clear_screen
+# clear_screen is a named maintenance unit. Keep behavior stable, check call
+# sites before changing it, and update man pages/help/comments when behavior
+# changes.
+# ----------------------------------------------------------
 clear_screen() { if [ -t 1 ]; then printf '\033[H\033[J'; fi; }
 
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function editor_command
+# editor_command is a named maintenance unit. Keep behavior stable, check
+# call sites before changing it, and update man pages/help/comments when
+# behavior changes.
+# ----------------------------------------------------------
 editor_command() {
   if [ -n "$EDITOR_CMD" ]; then printf '%s\n' "$EDITOR_CMD"
   elif [ -n "${VISUAL:-}" ]; then printf '%s\n' "$VISUAL"
@@ -219,6 +327,11 @@ mkdir -p "$CONFIG_DIR" "$SESSION_DIR" "$ATTACHMENT_DIR"
 # CONFIG WRITING / OPTIONS PARITY
 # ==========================================================
 
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function set_config_value
+# Writes one config key without destroying unrelated settings. Never use
+# this implicitly for secrets; saving should follow explicit user action.
+# ----------------------------------------------------------
 set_config_value() {
   local key="$1" value="$2" tmp
   mkdir -p "$CONFIG_DIR"
@@ -232,6 +345,12 @@ set_config_value() {
   chmod 600 "$CONFIG_FILE" 2>/dev/null || true
 }
 
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function remove_config_key
+# remove_config_key is a named maintenance unit. Keep behavior stable, check
+# call sites before changing it, and update man pages/help/comments when
+# behavior changes.
+# ----------------------------------------------------------
 remove_config_key() {
   local key="$1" tmp
   [ -f "$CONFIG_FILE" ] || return 0
@@ -241,6 +360,11 @@ remove_config_key() {
   chmod 600 "$CONFIG_FILE" 2>/dev/null || true
 }
 
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function print_config_summary
+# Line-oriented equivalent of the ncurses options screen. Bash users get
+# readable configuration state without a full-screen form.
+# ----------------------------------------------------------
 print_config_summary() {
   cat <<EOF
 $PROGRAM configuration summary
@@ -279,6 +403,12 @@ EOF
 # API KEY MANAGEMENT
 # ==========================================================
 
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function require_api_key
+# require_api_key is a named maintenance unit. Keep behavior stable, check
+# call sites before changing it, and update man pages/help/comments when
+# behavior changes.
+# ----------------------------------------------------------
 require_api_key() {
   if [ -z "$GEMINI_API_KEY" ]; then
     printf '%s\n' "ERROR: GEMINI_API_KEY not set."
@@ -289,6 +419,12 @@ require_api_key() {
   return 0
 }
 
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function set_api_key_command
+# set_api_key_command is a named maintenance unit. Keep behavior stable,
+# check call sites before changing it, and update man pages/help/comments
+# when behavior changes.
+# ----------------------------------------------------------
 set_api_key_command() {
   local answer key
   printf '%s\n' "This will save GEMINI_API_KEY in plaintext:"
@@ -304,14 +440,102 @@ set_api_key_command() {
   printf 'saved GEMINI_API_KEY to %s\n' "$CONFIG_FILE"
 }
 
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function forget_api_key_command
+# forget_api_key_command is a named maintenance unit. Keep behavior stable,
+# check call sites before changing it, and update man pages/help/comments
+# when behavior changes.
+# ----------------------------------------------------------
 forget_api_key_command() { remove_config_key "GEMINI_API_KEY"; printf 'removed GEMINI_API_KEY from config if present\n'; }
+
+
+# ==========================================================
+# DIAGNOSTICS / DOCTOR
+# ----------------------------------------------------------
+# The Python-helper Bash edition has enough moving parts that a quick doctor
+# command is useful for users and bug reporters. It checks tools, config,
+# storage paths, model cache state, editor availability, API-key presence, and
+# network reachability. It does not send a generation prompt to Gemini.
+# ==========================================================
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function doctor_status
+# doctor_status is a named maintenance unit. Keep behavior stable, check
+# call sites before changing it, and update man pages/help/comments when
+# behavior changes.
+# ----------------------------------------------------------
+doctor_status() { printf '[%-4s] %s: %s\n' "$1" "$2" "$3"; }
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function check_writable_dir
+# check_writable_dir is a named maintenance unit. Keep behavior stable,
+# check call sites before changing it, and update man pages/help/comments
+# when behavior changes.
+# ----------------------------------------------------------
+check_writable_dir() {
+  local path="$1" test_file
+  mkdir -p "$path" 2>/dev/null || { printf 'not creatable: %s' "$path"; return 1; }
+  test_file="$path/.gemini-cli-write-test-$$"
+  if printf '%s' ok > "$test_file" 2>/dev/null; then rm -f "$test_file"; printf 'writable: %s' "$path"; return 0; fi
+  printf 'not writable: %s' "$path"; return 1
+}
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function doctor_command
+# Diagnostic command. It should report environment state without sending
+# generation prompts or leaking API keys.
+# ----------------------------------------------------------
+doctor_command() {
+  local status detail editor_first
+  printf '%s\n\n' "gemini-cli diagnostics"
+  doctor_status OK program "$PROGRAM version $VERSION"
+  doctor_status OK bash "$BASH_VERSION"
+  for cmd in bash curl python3 sed awk grep tr mktemp; do
+    if command -v "$cmd" >/dev/null 2>&1; then doctor_status OK "command $cmd" "$(command -v "$cmd")"; else doctor_status FAIL "command $cmd" "not found"; fi
+  done
+  [ -f "$CONFIG_FILE" ] && doctor_status OK "config file" "$CONFIG_FILE present" || doctor_status WARN "config file" "not found: $CONFIG_FILE"
+  [ -n "$GEMINI_API_KEY" ] && doctor_status OK "API key" "loaded" || doctor_status WARN "API key" "not loaded"
+  detail="$(check_writable_dir "$SESSION_DIR")"; status=$?; doctor_status $([ "$status" -eq 0 ] && printf OK || printf FAIL) "session dir" "$detail"
+  detail="$(check_writable_dir "$ATTACHMENT_DIR")"; status=$?; doctor_status $([ "$status" -eq 0 ] && printf OK || printf FAIL) "attachment dir" "$detail"
+  detail="$(check_writable_dir "$(dirname "$MODEL_CACHE_FILE")")"; status=$?; doctor_status $([ "$status" -eq 0 ] && printf OK || printf FAIL) "model cache dir" "$detail"
+  [ -f "$MODEL_CACHE_FILE" ] && doctor_status OK "model cache" "$MODEL_CACHE_FILE present" || doctor_status WARN "model cache" "missing; run --update-models"
+  editor_first="${EDITOR_CMD:-${VISUAL:-${EDITOR:-vi}}}"; editor_first="${editor_first%% *}"
+  command -v "$editor_first" >/dev/null 2>&1 && doctor_status OK editor "$(command -v "$editor_first")" || doctor_status WARN editor "$editor_first not found"
+  python3 - <<'PYDOC' 2>/dev/null
+import socket
+host='generativelanguage.googleapis.com'
+try:
+    infos=socket.getaddrinfo(host,443,type=socket.SOCK_STREAM)
+    addrs=sorted({i[4][0] for i in infos})[:3]
+    print('[OK  ] DNS: %s resolves to %s' % (host, ', '.join(addrs)))
+except Exception as exc:
+    print('[WARN] DNS: lookup failed for %s: %s' % (host, exc))
+PYDOC
+  if [ -n "$GEMINI_API_KEY" ]; then
+    curl -sS --max-time 20 "https://generativelanguage.googleapis.com/v1beta/models?$(models_query)" >/dev/null 2>&1 && doctor_status OK "models endpoint" reachable || doctor_status WARN "models endpoint" "not reachable or API key invalid"
+  else
+    doctor_status WARN "models endpoint" "skipped: no API key"
+  fi
+}
 
 # ==========================================================
 # HELP / VERSION / CREDITS
 # ==========================================================
 
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function version
+# version is a named maintenance unit. Keep behavior stable, check call
+# sites before changing it, and update man pages/help/comments when behavior
+# changes.
+# ----------------------------------------------------------
 version() { printf '%s\n' "$PROGRAM version $VERSION"; }
 
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function credits
+# credits is a named maintenance unit. Keep behavior stable, check call
+# sites before changing it, and update man pages/help/comments when behavior
+# changes.
+# ----------------------------------------------------------
 credits() {
   cat <<'EOF'
 gemini-terminal-tools
@@ -324,6 +548,11 @@ Project Lead notice:
 EOF
 }
 
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function help_menu
+# Built-in user help. Keep it synchronized with the man page because
+# terminal users often discover tools through --help first.
+# ----------------------------------------------------------
 help_menu() {
   cat <<EOF
 $PROGRAM - terminal Gemini interface
@@ -334,6 +563,8 @@ USAGE
     $PROGRAM --list
     $PROGRAM --rename-session OLD NEW
     $PROGRAM --models [--all]
+    $PROGRAM --models --sort input-tokens
+    $PROGRAM --models --min-input-tokens 100000
     $PROGRAM --update-models
     $PROGRAM --test-model MODEL [--save]
     $PROGRAM --select-model [--save]
@@ -348,8 +579,19 @@ USAGE
     $PROGRAM --editor-prompt [session]
     $PROGRAM --attach FILE [session]
     $PROGRAM --credits
+    $PROGRAM --doctor
     $PROGRAM --version
     $PROGRAM --help
+
+MODEL HELP
+    Official Gemini model documentation:
+        https://ai.google.dev/gemini-api/docs/models
+
+    Models API reference:
+        https://ai.google.dev/api/models
+
+    GenerateContent API reference:
+        https://ai.google.dev/api/generate-content
 
 INPUT
     Type/paste text, then press Ctrl+D to send.
@@ -363,10 +605,28 @@ EOF
 # SESSION MANAGEMENT
 # ==========================================================
 
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function resolve_session_path
+# resolve_session_path is a named maintenance unit. Keep behavior stable,
+# check call sites before changing it, and update man pages/help/comments
+# when behavior changes.
+# ----------------------------------------------------------
 resolve_session_path() { printf '%s/%s.log\n' "$SESSION_DIR" "$1"; }
 
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function list_sessions
+# list_sessions is a named maintenance unit. Keep behavior stable, check
+# call sites before changing it, and update man pages/help/comments when
+# behavior changes.
+# ----------------------------------------------------------
 list_sessions() { local path; for path in "$SESSION_DIR"/*.log; do [ -e "$path" ] || continue; basename "$path" .log; done; }
 
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function rename_session_command
+# rename_session_command is a named maintenance unit. Keep behavior stable,
+# check call sites before changing it, and update man pages/help/comments
+# when behavior changes.
+# ----------------------------------------------------------
 rename_session_command() {
   local old_name new_name old_path new_path
   old_name="$(sanitize_session_name "$1")"; new_name="$(sanitize_session_name "$2")"
@@ -381,6 +641,11 @@ rename_session_command() {
 # MEMORY SNAPSHOTS / RESUME CONTEXT
 # ==========================================================
 
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function load_context_from_path
+# Rebuilds memory from logs. This is what lets Bash resumed sessions behave
+# like conversations instead of just appending to a file.
+# ----------------------------------------------------------
 load_context_from_path() {
   local path="$1"
   python3 - "$path" "$CONTEXT_TURNS" <<'PY'
@@ -425,14 +690,31 @@ for entry in snapshot:
 PY
 }
 
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function load_context_from_session
+# load_context_from_session is a named maintenance unit. Keep behavior
+# stable, check call sites before changing it, and update man
+# pages/help/comments when behavior changes.
+# ----------------------------------------------------------
 load_context_from_session() { load_context_from_path "$SESSION"; }
 
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function rebuild_context_from_session
+# rebuild_context_from_session is a named maintenance unit. Keep behavior
+# stable, check call sites before changing it, and update man
+# pages/help/comments when behavior changes.
+# ----------------------------------------------------------
 rebuild_context_from_session() {
   CONTEXT_BUFFER=()
   [ -f "$SESSION" ] || return 0
   while IFS= read -r -d '' entry; do CONTEXT_BUFFER+=("$entry"); done < <(load_context_from_session)
 }
 
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function write_context_snapshot_to_path
+# Stores explicit memory snapshots in logs. This future-proofs resume
+# behavior when logs become long or contain non-chat system messages.
+# ----------------------------------------------------------
 write_context_snapshot_to_path() {
   local path="$1" ts="$2" item
   printf '[%s] system: CONTEXT_BEGIN\n' "$ts" >> "$path"
@@ -440,8 +722,20 @@ write_context_snapshot_to_path() {
   printf '[%s] system: CONTEXT_END\n' "$ts" >> "$path"
 }
 
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function write_context_snapshot
+# write_context_snapshot is a named maintenance unit. Keep behavior stable,
+# check call sites before changing it, and update man pages/help/comments
+# when behavior changes.
+# ----------------------------------------------------------
 write_context_snapshot() { write_context_snapshot_to_path "$SESSION" "$1"; }
 
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function show_memory_command
+# show_memory_command is a named maintenance unit. Keep behavior stable,
+# check call sites before changing it, and update man pages/help/comments
+# when behavior changes.
+# ----------------------------------------------------------
 show_memory_command() {
   local name path
   name="$(sanitize_session_name "$1")"; path="$(resolve_session_path "$name")"
@@ -449,6 +743,12 @@ show_memory_command() {
   while IFS= read -r -d '' entry; do printf '%s\n' "$entry"; done < <(load_context_from_path "$path")
 }
 
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function edit_memory_command
+# edit_memory_command is a named maintenance unit. Keep behavior stable,
+# check call sites before changing it, and update man pages/help/comments
+# when behavior changes.
+# ----------------------------------------------------------
 edit_memory_command() {
   local name path tmp editor
   name="$(sanitize_session_name "$1")"; path="$(resolve_session_path "$name")"
@@ -461,6 +761,12 @@ edit_memory_command() {
   printf 'saved edited memory snapshot for session: %s\n' "$name"
 }
 
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function clear_memory_command
+# clear_memory_command is a named maintenance unit. Keep behavior stable,
+# check call sites before changing it, and update man pages/help/comments
+# when behavior changes.
+# ----------------------------------------------------------
 clear_memory_command() {
   local name path
   name="$(sanitize_session_name "$1")"; path="$(resolve_session_path "$name")"
@@ -473,6 +779,11 @@ clear_memory_command() {
 # MODEL CACHE / FILTERING
 # ==========================================================
 
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function fetch_models_live_json
+# The only live model-list fetch path. Ordinary model display should prefer
+# cache when possible to avoid unnecessary network calls.
+# ----------------------------------------------------------
 fetch_models_live_json() {
   local url response curl_status
   require_api_key || return 1
@@ -482,6 +793,11 @@ fetch_models_live_json() {
   printf '%s' "$response"
 }
 
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function update_models_cache
+# User-requested cache refresh. Model discovery belongs here, not hidden
+# behind casual screen navigation.
+# ----------------------------------------------------------
 update_models_cache() {
   local json
   json="$(fetch_models_live_json)" || return 1
@@ -490,10 +806,21 @@ update_models_cache() {
   printf 'updated model cache: %s\n' "$MODEL_CACHE_FILE" >&2
 }
 
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function models_json_for_display
+# models_json_for_display is a named maintenance unit. Keep behavior stable,
+# check call sites before changing it, and update man pages/help/comments
+# when behavior changes.
+# ----------------------------------------------------------
 models_json_for_display() {
   if [ -f "$MODEL_CACHE_FILE" ]; then cat "$MODEL_CACHE_FILE"; else update_models_cache >/dev/null || return 1; cat "$MODEL_CACHE_FILE"; fi
 }
 
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function parse_models_table
+# Python JSON parsing keeps model metadata extraction maintainable. Bash-
+# only must approximate this, but this edition should stay robust.
+# ----------------------------------------------------------
 parse_models_table() {
   local show_all="$1"
   python3 - "$show_all" "$MODEL_FILTER_GENERATE_CONTENT" "$MODEL_FILTER_REQUIRE_TOKENS" "$MODEL_FILTER_HIDE_PREVIEW" "$MODEL_MIN_INPUT_TOKENS" "$MODEL_MIN_OUTPUT_TOKENS" "$MODEL_SORT_ORDER" <<'PY'
@@ -539,12 +866,24 @@ for r in rows: print("\t".join(map(str,r)))
 PY
 }
 
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function print_models
+# print_models is a named maintenance unit. Keep behavior stable, check call
+# sites before changing it, and update man pages/help/comments when behavior
+# changes.
+# ----------------------------------------------------------
 print_models() { local json; json="$(models_json_for_display)" || return 1; printf '%s' "$json" | parse_models_table "$SHOW_ALL_MODELS"; }
 
 # ==========================================================
 # GEMINI GENERATION / ATTACHMENT PAYLOADS
 # ==========================================================
 
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function make_generate_payload
+# Builds valid Gemini JSON from arbitrary text and attachments. Do not
+# replace with manual string interpolation unless you also handle quotes,
+# backslashes, and newlines.
+# ----------------------------------------------------------
 make_generate_payload() {
   python3 - "$MAX_ATTACHMENT_BYTES" "$@" <<'PY'
 import base64, json, mimetypes, os, sys
@@ -567,6 +906,12 @@ print(json.dumps({"contents":[{"parts":parts}]}))
 PY
 }
 
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function parse_generate_response
+# parse_generate_response is a named maintenance unit. Keep behavior stable,
+# check call sites before changing it, and update man pages/help/comments
+# when behavior changes.
+# ----------------------------------------------------------
 parse_generate_response() {
   python3 - "$ATTACHMENT_DIR" "$SESSION_NAME" <<'PY'
 import base64, json, mimetypes, os, re, sys
@@ -605,6 +950,11 @@ print(output)
 PY
 }
 
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function call_gemini_model
+# Single generation transport function. Keeping curl/API behavior
+# centralized makes quota, timeout, and error changes easier.
+# ----------------------------------------------------------
 call_gemini_model() {
   local model="$1" prompt="$2" timeout="${3:-120}"; shift 3 || true
   local attachments=("$@") clean_model quoted_model url response curl_status output parse_status
@@ -622,8 +972,19 @@ call_gemini_model() {
 # USER-OPERATED MODEL TESTING / SELECTION
 # ==========================================================
 
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function run_model_test
+# User-operated model test. This replaced automatic scanning/probing; keep
+# it one-model-at-a-time and transparent to the user.
+# ----------------------------------------------------------
 run_model_test() { local model="$1" output status; printf 'Model: %s\nTest prompt: %s\n\n--- model response ---\n' "$model" "$MODEL_TEST_PROMPT"; output="$(call_gemini_model "$model" "$MODEL_TEST_PROMPT" 60)"; status=$?; printf '%s\n--- end response ---\n' "$output"; return "$status"; }
 
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function test_model_command
+# test_model_command is a named maintenance unit. Keep behavior stable,
+# check call sites before changing it, and update man pages/help/comments
+# when behavior changes.
+# ----------------------------------------------------------
 test_model_command() {
   local model="$1" status
   [ -n "$model" ] || { printf '%s\n' "ERROR: --test-model requires a model id." >&2; return 2; }
@@ -632,6 +993,12 @@ test_model_command() {
   return "$status"
 }
 
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function removed_autoscan_message
+# removed_autoscan_message is a named maintenance unit. Keep behavior
+# stable, check call sites before changing it, and update man
+# pages/help/comments when behavior changes.
+# ----------------------------------------------------------
 removed_autoscan_message() { cat <<EOF
 ERROR: --autoscan-model has been removed.
 
@@ -645,6 +1012,11 @@ The Bash version no longer probes every available model automatically.
 EOF
 }
 
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function select_model_command
+# Line-oriented model selector. It should use metadata and optional testing
+# instead of guessing which future Google model is best.
+# ----------------------------------------------------------
 select_model_command() {
   local json table line index choice selected_line selected_model display input_limit output_limit badges answer test_status=0
   json="$(models_json_for_display)" || return 1
@@ -683,11 +1055,22 @@ select_model_command() {
 #   Assistant: ...
 # ==========================================================
 
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function add_to_context
+# Adds one speaker entry to rolling context memory. This is not the same as
+# permanent logging.
+# ----------------------------------------------------------
 add_to_context() {
   CONTEXT_BUFFER+=("$1")
   trim_context_buffer
 }
 
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function trim_context_buffer
+# trim_context_buffer is a named maintenance unit. Keep behavior stable,
+# check call sites before changing it, and update man pages/help/comments
+# when behavior changes.
+# ----------------------------------------------------------
 trim_context_buffer() {
   local max_entries=$((CONTEXT_TURNS * 2))
   while [ "${#CONTEXT_BUFFER[@]}" -gt "$max_entries" ]; do
@@ -695,6 +1078,12 @@ trim_context_buffer() {
   done
 }
 
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function build_context
+# build_context is a named maintenance unit. Keep behavior stable, check
+# call sites before changing it, and update man pages/help/comments when
+# behavior changes.
+# ----------------------------------------------------------
 build_context() {
   local context="$SUMMARY"
   local msg
@@ -711,6 +1100,11 @@ build_context() {
 # ATTACHMENT EXTRACTION SYSTEM
 # ==========================================================
 
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function extract_attachments
+# Turns fenced code blocks into files. This preserves terminal readability
+# and makes generated artifacts useful in a Unix workflow.
+# ----------------------------------------------------------
 extract_attachments() {
   python3 -c '
 import os, re, sys
@@ -740,6 +1134,11 @@ print(pattern.sub(repl,text))
 # EXTERNAL EDITOR PROMPT
 # ==========================================================
 
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function compose_with_editor
+# External editor support for long prompts. This is a Unix productivity
+# feature, not a convenience gimmick.
+# ----------------------------------------------------------
 compose_with_editor() {
   local tmp editor
   tmp="$(mktemp)"; editor="$(editor_command)"
@@ -757,11 +1156,20 @@ while [ "$#" -gt 0 ]; do
     -h|--help|help) ACTION="help" ;;
     --version) ACTION="version" ;;
     --credits) ACTION="credits" ;;
+    --doctor) ACTION="doctor" ;;
     --list) ACTION="list" ;;
     --rename-session) ACTION="rename"; shift; RENAME_OLD="${1:-}"; shift; RENAME_NEW="${1:-}" ;;
     --models) ACTION="models" ;;
     --update-models) ACTION="update-models" ;;
     --all) SHOW_ALL_MODELS=1 ;;
+    --sort) shift; MODEL_SORT_ORDER="${1:-$MODEL_SORT_ORDER}" ;;
+    --modellist-sort-tokens) MODEL_SORT_ORDER="input-tokens" ;;
+    --min-input-tokens) shift; MODEL_MIN_INPUT_TOKENS="${1:-$MODEL_MIN_INPUT_TOKENS}" ;;
+    --min-output-tokens) shift; MODEL_MIN_OUTPUT_TOKENS="${1:-$MODEL_MIN_OUTPUT_TOKENS}" ;;
+    --hide-preview) MODEL_FILTER_HIDE_PREVIEW=1 ;;
+    --show-preview) MODEL_FILTER_HIDE_PREVIEW=0 ;;
+    --require-tokens) MODEL_FILTER_REQUIRE_TOKENS=1 ;;
+    --allow-missing-tokens) MODEL_FILTER_REQUIRE_TOKENS=0 ;;
     --test-model) ACTION="test"; shift; TEST_MODEL="${1:-}" ;;
     --autoscan-model) ACTION="removed-autoscan" ;;
     --select-model) ACTION="select" ;;
@@ -788,6 +1196,7 @@ case "$ACTION" in
   help) help_menu; exit 0 ;;
   version) version; exit 0 ;;
   credits) credits; exit 0 ;;
+  doctor) doctor_command; exit $? ;;
   list) list_sessions; exit 0 ;;
   rename) [ -n "$RENAME_OLD" ] && [ -n "$RENAME_NEW" ] || { printf '%s\n' "ERROR: --rename-session requires OLD NEW" >&2; exit 2; }; rename_session_command "$RENAME_OLD" "$RENAME_NEW"; exit $? ;;
   models) print_models; exit $? ;;
@@ -824,6 +1233,12 @@ ACTIVE_MODEL="$(effective_model)"
 NOTICE_VISIBLE=0
 if truthy "$STARTUP_NOTICE" && [ "$SESSION_WAS_EMPTY" -eq 1 ]; then NOTICE_VISIBLE=1; fi
 
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function print_chat_header
+# print_chat_header is a named maintenance unit. Keep behavior stable, check
+# call sites before changing it, and update man pages/help/comments when
+# behavior changes.
+# ----------------------------------------------------------
 print_chat_header() {
   printf '%s\n' "$PROGRAM"
   printf 'session: %s\n' "$SESSION"
@@ -838,8 +1253,19 @@ print_chat_header() {
   fi
 }
 
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function print_project_lead_notice
+# print_project_lead_notice is a named maintenance unit. Keep behavior
+# stable, check call sites before changing it, and update man
+# pages/help/comments when behavior changes.
+# ----------------------------------------------------------
 print_project_lead_notice() { printf '[%s] %s: %s\n\n' "$(timestamp)" "$PROJECT_LEAD_NAME" "$PROJECT_LEAD_NOTICE"; }
 
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function send_one_message
+# Main per-message path: log user input, update memory, call Gemini, extract
+# attachments, snapshot memory, and display output.
+# ----------------------------------------------------------
 send_one_message() {
   local buffer="$1" ts output output_status cleaned_output prompt_text
   ts="$(timestamp)"
