@@ -1,13 +1,52 @@
 #!/usr/bin/env python3
 """
-gemini-curses
+gemini-ncurses-python
 
-Ncurses-based Gemini terminal interface for the gemini-terminal-tools project.
+Full-screen Python ncurses implementation for gemini-terminal-tools.
 
-This release removes automatic model scanning and replaces it with an explicit,
-user-operated model tester. It also adds session browsing/renaming, config
-options, memory viewing/editing, external editor support, credits, file
-attachment support, cached model lists, metadata-based model filtering, full global function-key navigation, and an editor selection menu.
+MAINTAINER COMMENTARY
+=====================
+This source file is intentionally verbose.  The comments are not here merely to
+teach Python or curses; they are here to future-proof the project.  A terminal
+AI client depends on several moving parts that may change independently: Google
+model names, the Gemini REST schema, terminal emulator behavior, ncurses mouse
+semantics, filesystem layout, user config expectations, and the project's own
+parallel Bash/C implementations.  When one of those parts changes, maintainers
+need to understand why the code is shaped the way it is before they safely patch
+it.
+
+The Python ncurses version is the behavioral reference implementation for the
+future native C ncurses version.  That means this file should remain readable to
+people who may not want to preserve the Python code exactly, but who do need to
+copy the design: session logs, rolling context memory, model list caching,
+user-operated model testing, attachment conventions, file browsing, editor
+integration, and global function-key navigation.
+
+The design posture is deliberately end-user oriented.  This is not a developer
+curl example and not an SDK demonstration.  The program's job is to let people
+use AI productively from a terminal without a browser.  If a feature forces the
+user to think like an API developer, that feature should probably be wrapped in
+a menu, a status explanation, or a diagnostic screen.
+
+Several implementation choices in this file are conservative on purpose:
+
+* The config format is simple KEY=VALUE so the Bash versions and future C
+  version can share it without a heavy parser.
+* Model selection is metadata-driven and user-operated.  The program should not
+  automatically probe every model.  It lists models, filters metadata, lets the
+  user inspect/test one model, and then lets the user activate/save it.
+* Logs are plain text because they must be greppable, recoverable, and readable
+  even if this program stops working.
+* Memory snapshots are saved into logs so a resumed session can regain context.
+* Generated/code attachments are saved as files because a terminal workflow is
+  strongest when artifacts become ordinary filesystem objects.
+* Function keys are treated as global navigation.  A user should not get trapped
+  in a modal screen after hitting the wrong key.
+
+If you fork this project, preserve these ideas unless you are deliberately
+changing the product philosophy.  If you maintain this project, prefer clear
+state transitions, explicit user consent for network actions, and comments that
+explain design intent rather than only restating the syntax.
 """
 
 from __future__ import annotations
@@ -36,7 +75,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 VERSION = "0.8.1"
-PROGRAM = "gemini-curses"
+PROGRAM = "gemini-ncurses-python"
 FALLBACK_MODEL = "gemini-2.5-flash"
 DEFAULT_MODEL_TEST_PROMPT = "Please reply with one short sentence confirming this model is available for text generation."
 DEFAULT_GITHUB_URL = "https://github.com/remfan1994/gemini-terminal-tools"
@@ -68,6 +107,12 @@ DEFAULT_MODEL_SORT_ORDER = "api"
 
 
 @dataclass
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: class Config
+# Central configuration record. Keep this boring and explicit because all implementations share
+# the same conceptual settings. If you add a config key here, update the config loader, options
+# UI, man page, README, and Bash variants.
+# ------------------------------------------------------------
 class Config:
     model: str = ""
     context_turns: int = 12
@@ -90,24 +135,54 @@ class Config:
     model_sort_order: str = DEFAULT_MODEL_SORT_ORDER
 
     @property
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def effective_model
+    # Maintainer note for effective_model: this routine is part of the long-term public behavior
+    # of the program. When changing it, check callers, documentation, config compatibility,
+    # session-log compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def effective_model(self) -> str:
         return self.model or FALLBACK_MODEL
 
     @property
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def effective_attachment_dir
+    # Maintainer note for effective_attachment_dir: this routine is part of the long-term public
+    # behavior of the program. When changing it, check callers, documentation, config
+    # compatibility, session-log compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def effective_attachment_dir(self) -> Path:
         if self.attachment_dir is not None:
             return self.attachment_dir
         return self.session_dir / "attachments"
 
     @property
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def effective_editor
+    # Maintainer note for effective_editor: this routine is part of the long-term public
+    # behavior of the program. When changing it, check callers, documentation, config
+    # compatibility, session-log compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def effective_editor(self) -> str:
         return self.editor or os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"
 
 
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: def expand_path
+# Maintainer note for expand_path: this routine is part of the long-term public behavior of the
+# program. When changing it, check callers, documentation, config compatibility, session-log
+# compatibility, and the parallel Bash/C implementation plans.
+# ------------------------------------------------------------
 def expand_path(value: str) -> Path:
     return Path(os.path.expandvars(os.path.expanduser(value))).resolve()
 
 
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: def normalize_model_id
+# Maintainer note for normalize_model_id: this routine is part of the long-term public behavior
+# of the program. When changing it, check callers, documentation, config compatibility, session-
+# log compatibility, and the parallel Bash/C implementation plans.
+# ------------------------------------------------------------
 def normalize_model_id(model: str) -> str:
     model = model.strip()
     if model.startswith("models/"):
@@ -115,6 +190,12 @@ def normalize_model_id(model: str) -> str:
     return model
 
 
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: def parse_positive_int
+# Maintainer note for parse_positive_int: this routine is part of the long-term public behavior
+# of the program. When changing it, check callers, documentation, config compatibility, session-
+# log compatibility, and the parallel Bash/C implementation plans.
+# ------------------------------------------------------------
 def parse_positive_int(value: str, fallback: int) -> int:
     try:
         parsed = int(value)
@@ -123,6 +204,12 @@ def parse_positive_int(value: str, fallback: int) -> int:
     return max(1, parsed)
 
 
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: def parse_nonnegative_int
+# Maintainer note for parse_nonnegative_int: this routine is part of the long-term public
+# behavior of the program. When changing it, check callers, documentation, config compatibility,
+# session-log compatibility, and the parallel Bash/C implementation plans.
+# ------------------------------------------------------------
 def parse_nonnegative_int(value: str, fallback: int) -> int:
     try:
         parsed = int(value)
@@ -131,6 +218,12 @@ def parse_nonnegative_int(value: str, fallback: int) -> int:
     return max(0, parsed)
 
 
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: def parse_bool
+# Maintainer note for parse_bool: this routine is part of the long-term public behavior of the
+# program. When changing it, check callers, documentation, config compatibility, session-log
+# compatibility, and the parallel Bash/C implementation plans.
+# ------------------------------------------------------------
 def parse_bool(value: str, default: bool = False) -> bool:
     value = value.strip().lower()
     if value in {"1", "yes", "true", "on", "y"}:
@@ -140,6 +233,11 @@ def parse_bool(value: str, default: bool = False) -> bool:
     return default
 
 
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: def load_config
+# Reads the shared KEY=VALUE config file. This is deliberately not TOML/YAML/JSON because Bash-
+# only and future C implementations must be able to follow the same rules.
+# ------------------------------------------------------------
 def load_config() -> Config:
     cfg = Config()
     env_api_key = os.environ.get("GEMINI_API_KEY", "")
@@ -207,6 +305,11 @@ def load_config() -> Config:
     return cfg
 
 
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: def set_config_value
+# Writes one config key while preserving unrelated lines. This helper is used only after
+# explicit user action; it should never silently save secrets or behavioral choices.
+# ------------------------------------------------------------
 def set_config_value(cfg: Config, key: str, value: str) -> None:
     cfg.config_file.parent.mkdir(parents=True, exist_ok=True)
     lines: List[str] = []
@@ -238,6 +341,11 @@ def set_config_value(cfg: Config, key: str, value: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: def parse_args
+# Command-line entry point. Keep command names stable because scripts and users may depend on
+# them. The full-screen UI can be rich, but CLI flags should remain predictable.
+# ------------------------------------------------------------
 def parse_args() -> argparse.Namespace:
     if len(sys.argv) == 2 and sys.argv[1] == "help":
         sys.argv[1] = "--help"
@@ -254,16 +362,34 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: def sanitize_session_name
+# Maintainer note for sanitize_session_name: this routine is part of the long-term public
+# behavior of the program. When changing it, check callers, documentation, config compatibility,
+# session-log compatibility, and the parallel Bash/C implementation plans.
+# ------------------------------------------------------------
 def sanitize_session_name(name: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", name.strip())
     cleaned = cleaned.strip("._-")
     return cleaned or "session"
 
 
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: def default_session_name
+# Maintainer note for default_session_name: this routine is part of the long-term public
+# behavior of the program. When changing it, check callers, documentation, config compatibility,
+# session-log compatibility, and the parallel Bash/C implementation plans.
+# ------------------------------------------------------------
 def default_session_name() -> str:
     return "session-" + datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
 
 
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: def list_sessions
+# Maintainer note for list_sessions: this routine is part of the long-term public behavior of
+# the program. When changing it, check callers, documentation, config compatibility, session-log
+# compatibility, and the parallel Bash/C implementation plans.
+# ------------------------------------------------------------
 def list_sessions(session_dir: Path) -> None:
     session_dir.mkdir(parents=True, exist_ok=True)
     for path in sorted(session_dir.glob("*.log")):
@@ -283,12 +409,24 @@ def list_sessions(session_dir: Path) -> None:
 
 
 @dataclass
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: class DoctorResult
+# Maintainer note for DoctorResult: this routine is part of the long-term public behavior of the
+# program. When changing it, check callers, documentation, config compatibility, session-log
+# compatibility, and the parallel Bash/C implementation plans.
+# ------------------------------------------------------------
 class DoctorResult:
     status: str
     label: str
     detail: str
 
 
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: def resolve_command
+# Maintainer note for resolve_command: this routine is part of the long-term public behavior of
+# the program. When changing it, check callers, documentation, config compatibility, session-log
+# compatibility, and the parallel Bash/C implementation plans.
+# ------------------------------------------------------------
 def resolve_command(command_line: str) -> Tuple[bool, str]:
     """Resolve the executable portion of an editor/command string."""
     if not command_line.strip():
@@ -311,11 +449,17 @@ def resolve_command(command_line: str) -> Tuple[bool, str]:
     return False, f"not found in PATH: {exe}"
 
 
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: def check_writable_directory
+# Maintainer note for check_writable_directory: this routine is part of the long-term public
+# behavior of the program. When changing it, check callers, documentation, config compatibility,
+# session-log compatibility, and the parallel Bash/C implementation plans.
+# ------------------------------------------------------------
 def check_writable_directory(path: Path) -> Tuple[bool, str]:
     """Check whether a directory can be created and written to."""
     try:
         path.mkdir(parents=True, exist_ok=True)
-        probe = path / f".gemini-curses-doctor-write-test-{os.getpid()}"
+        probe = path / f".gemini-ncurses-python-doctor-write-test-{os.getpid()}"
         probe.write_text("ok", encoding="utf-8")
         probe.unlink(missing_ok=True)
         return True, str(path)
@@ -323,6 +467,12 @@ def check_writable_directory(path: Path) -> Tuple[bool, str]:
         return False, f"{path}: {exc}"
 
 
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: def check_dns
+# Maintainer note for check_dns: this routine is part of the long-term public behavior of the
+# program. When changing it, check callers, documentation, config compatibility, session-log
+# compatibility, and the parallel Bash/C implementation plans.
+# ------------------------------------------------------------
 def check_dns(hostname: str = "generativelanguage.googleapis.com") -> Tuple[bool, str]:
     """Check DNS resolution for the Gemini API host without a model request."""
     old_timeout = socket.getdefaulttimeout()
@@ -339,6 +489,12 @@ def check_dns(hostname: str = "generativelanguage.googleapis.com") -> Tuple[bool
         socket.setdefaulttimeout(old_timeout)
 
 
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: def model_cache_summary
+# Maintainer note for model_cache_summary: this routine is part of the long-term public behavior
+# of the program. When changing it, check callers, documentation, config compatibility, session-
+# log compatibility, and the parallel Bash/C implementation plans.
+# ------------------------------------------------------------
 def model_cache_summary(cfg: Config) -> Tuple[bool, str]:
     """Summarize cached model-list state without contacting Google."""
     models, error, updated_at = load_model_cache(cfg)
@@ -348,6 +504,11 @@ def model_cache_summary(cfg: Config) -> Tuple[bool, str]:
     return True, f"{len(visible)}/{len(models)} models visible after filters; updated {updated_at}"
 
 
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: def doctor_report
+# Diagnostics gather environmental facts without sending chat prompts. This helps distinguish
+# app bugs from DNS, API-key, terminal-size, or filesystem problems.
+# ------------------------------------------------------------
 def doctor_report(cfg: Config) -> List[DoctorResult]:
     """Return diagnostics as structured rows.
 
@@ -355,6 +516,12 @@ def doctor_report(cfg: Config) -> List[DoctorResult]:
     """
     rows: List[DoctorResult] = []
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def add
+    # Maintainer note for add: this routine is part of the long-term public behavior of the
+    # program. When changing it, check callers, documentation, config compatibility, session-log
+    # compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def add(status: str, label: str, detail: str) -> None:
         rows.append(DoctorResult(status, label, detail))
 
@@ -393,9 +560,15 @@ def doctor_report(cfg: Config) -> List[DoctorResult]:
     return rows
 
 
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: def doctor_lines
+# Maintainer note for doctor_lines: this routine is part of the long-term public behavior of the
+# program. When changing it, check callers, documentation, config compatibility, session-log
+# compatibility, and the parallel Bash/C implementation plans.
+# ------------------------------------------------------------
 def doctor_lines(cfg: Config) -> List[str]:
     lines = [
-        "gemini-curses diagnostics",
+        "gemini-ncurses-python diagnostics",
         "",
         "OK = ready, WARN = check recommended, FAIL = likely broken",
         "",
@@ -407,6 +580,12 @@ def doctor_lines(cfg: Config) -> List[str]:
     return lines
 
 
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: def print_doctor
+# Maintainer note for print_doctor: this routine is part of the long-term public behavior of the
+# program. When changing it, check callers, documentation, config compatibility, session-log
+# compatibility, and the parallel Bash/C implementation plans.
+# ------------------------------------------------------------
 def print_doctor(cfg: Config) -> int:
     rows = doctor_report(cfg)
     for line in doctor_lines(cfg):
@@ -420,6 +599,11 @@ def print_doctor(cfg: Config) -> int:
 
 
 @dataclass
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: class ModelInfo
+# Structured model metadata from Google listModels. The selector should rely on this metadata
+# instead of guessing future model names.
+# ------------------------------------------------------------
 class ModelInfo:
     model_id: str
     api_name: str
@@ -431,6 +615,12 @@ class ModelInfo:
 
 
 @dataclass
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: class ModelFilter
+# Maintainer note for ModelFilter: this routine is part of the long-term public behavior of the
+# program. When changing it, check callers, documentation, config compatibility, session-log
+# compatibility, and the parallel Bash/C implementation plans.
+# ------------------------------------------------------------
 class ModelFilter:
     # Metadata-based filters for the model selector. These use the capabilities
     # returned by the model-list endpoint instead of probing every model.
@@ -442,11 +632,23 @@ class ModelFilter:
 
 
 @dataclass
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: class PendingAttachment
+# Maintainer note for PendingAttachment: this routine is part of the long-term public behavior
+# of the program. When changing it, check callers, documentation, config compatibility, session-
+# log compatibility, and the parallel Bash/C implementation plans.
+# ------------------------------------------------------------
 class PendingAttachment:
     path: Path
     mime_type: str
 
 
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: def model_endpoint
+# Maintainer note for model_endpoint: this routine is part of the long-term public behavior of
+# the program. When changing it, check callers, documentation, config compatibility, session-log
+# compatibility, and the parallel Bash/C implementation plans.
+# ------------------------------------------------------------
 def model_endpoint(cfg: Config, model_id: str) -> str:
     clean_id = normalize_model_id(model_id)
     return (
@@ -456,11 +658,23 @@ def model_endpoint(cfg: Config, model_id: str) -> str:
     )
 
 
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: def guess_mime
+# Maintainer note for guess_mime: this routine is part of the long-term public behavior of the
+# program. When changing it, check callers, documentation, config compatibility, session-log
+# compatibility, and the parallel Bash/C implementation plans.
+# ------------------------------------------------------------
 def guess_mime(path: Path) -> str:
     mime, _encoding = mimetypes.guess_type(str(path))
     return mime or "application/octet-stream"
 
 
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: def mime_extension
+# Maintainer note for mime_extension: this routine is part of the long-term public behavior of
+# the program. When changing it, check callers, documentation, config compatibility, session-log
+# compatibility, and the parallel Bash/C implementation plans.
+# ------------------------------------------------------------
 def mime_extension(mime_type: str) -> str:
     ext = mimetypes.guess_extension(mime_type) or ".bin"
     if ext == ".jpe":
@@ -468,6 +682,11 @@ def mime_extension(mime_type: str) -> str:
     return ext
 
 
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: def build_gemini_parts
+# Builds REST request parts. Keep text/media separation clear so maintainers can adapt when
+# Gemini changes MIME or file handling rules.
+# ------------------------------------------------------------
 def build_gemini_parts(prompt_text: str, attachments: List[PendingAttachment]) -> List[dict]:
     parts: List[dict] = [{"text": prompt_text}]
 
@@ -501,6 +720,11 @@ def build_gemini_parts(prompt_text: str, attachments: List[PendingAttachment]) -
     return parts
 
 
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: def save_inline_response_parts
+# Saves generated inline data from Gemini. Models may or may not return media; this code must be
+# defensive and never assume text-only output forever.
+# ------------------------------------------------------------
 def save_inline_response_parts(parsed: dict, attachment_dir: Path, session_name: str) -> str:
     notices: List[str] = []
     attachment_dir.mkdir(parents=True, exist_ok=True)
@@ -526,6 +750,12 @@ def save_inline_response_parts(parsed: dict, attachment_dir: Path, session_name:
     return "\n".join(notices)
 
 
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: def parse_generated_text_and_files
+# Maintainer note for parse_generated_text_and_files: this routine is part of the long-term
+# public behavior of the program. When changing it, check callers, documentation, config
+# compatibility, session-log compatibility, and the parallel Bash/C implementation plans.
+# ------------------------------------------------------------
 def parse_generated_text_and_files(body: str, attachment_dir: Path, session_name: str) -> str:
     parsed = json.loads(body)
     text_chunks: List[str] = []
@@ -540,6 +770,11 @@ def parse_generated_text_and_files(body: str, attachment_dir: Path, session_name
     return text
 
 
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: def generate_with_model
+# Single Gemini generation request. All request-part construction funnels through this area so
+# attachments, text prompts, and future media behavior stay centralized.
+# ------------------------------------------------------------
 def generate_with_model(
     cfg: Config,
     model_id: str,
@@ -582,6 +817,12 @@ def generate_with_model(
     return True, text
 
 
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: def call_gemini
+# Maintainer note for call_gemini: this routine is part of the long-term public behavior of the
+# program. When changing it, check callers, documentation, config compatibility, session-log
+# compatibility, and the parallel Bash/C implementation plans.
+# ------------------------------------------------------------
 def call_gemini(cfg: Config, prompt_text: str, session_name: str, attachment_dir: Path, attachments: List[PendingAttachment]) -> str:
     ok, text = generate_with_model(cfg, cfg.effective_model, prompt_text, session_name, attachment_dir, attachments, timeout=120)
     if ok:
@@ -589,6 +830,11 @@ def call_gemini(cfg: Config, prompt_text: str, session_name: str, attachment_dir
     return f"({text})"
 
 
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: def fetch_models
+# Network model discovery. This should be called only when the user asks to update/load models,
+# not merely because they opened a screen.
+# ------------------------------------------------------------
 def fetch_models(cfg: Config) -> Tuple[List[ModelInfo], Optional[str]]:
     if not cfg.api_key:
         return [], "No Gemini API key loaded. Press F3 to paste an API key."
@@ -649,6 +895,12 @@ def fetch_models(cfg: Config) -> Tuple[List[ModelInfo], Optional[str]]:
     return list(unique.values()), None
 
 
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: def model_to_dict
+# Maintainer note for model_to_dict: this routine is part of the long-term public behavior of
+# the program. When changing it, check callers, documentation, config compatibility, session-log
+# compatibility, and the parallel Bash/C implementation plans.
+# ------------------------------------------------------------
 def model_to_dict(model: ModelInfo) -> dict:
     return {
         "model_id": model.model_id,
@@ -661,6 +913,12 @@ def model_to_dict(model: ModelInfo) -> dict:
     }
 
 
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: def model_from_dict
+# Maintainer note for model_from_dict: this routine is part of the long-term public behavior of
+# the program. When changing it, check callers, documentation, config compatibility, session-log
+# compatibility, and the parallel Bash/C implementation plans.
+# ------------------------------------------------------------
 def model_from_dict(raw: dict) -> ModelInfo:
     return ModelInfo(
         model_id=str(raw.get("model_id", "")),
@@ -675,10 +933,22 @@ def model_from_dict(raw: dict) -> ModelInfo:
 
 
 
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: def model_supports_generate_content
+# Maintainer note for model_supports_generate_content: this routine is part of the long-term
+# public behavior of the program. When changing it, check callers, documentation, config
+# compatibility, session-log compatibility, and the parallel Bash/C implementation plans.
+# ------------------------------------------------------------
 def model_supports_generate_content(model: ModelInfo) -> bool:
     return "generateContent" in (model.methods or [])
 
 
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: def model_token_value
+# Maintainer note for model_token_value: this routine is part of the long-term public behavior
+# of the program. When changing it, check callers, documentation, config compatibility, session-
+# log compatibility, and the parallel Bash/C implementation plans.
+# ------------------------------------------------------------
 def model_token_value(value: Optional[int]) -> int:
     try:
         if value is None:
@@ -688,10 +958,22 @@ def model_token_value(value: Optional[int]) -> int:
         return 0
 
 
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: def model_has_token_limits
+# Maintainer note for model_has_token_limits: this routine is part of the long-term public
+# behavior of the program. When changing it, check callers, documentation, config compatibility,
+# session-log compatibility, and the parallel Bash/C implementation plans.
+# ------------------------------------------------------------
 def model_has_token_limits(model: ModelInfo) -> bool:
     return model_token_value(model.input_token_limit) > 0 and model_token_value(model.output_token_limit) > 0
 
 
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: def model_is_preview_or_experimental
+# Maintainer note for model_is_preview_or_experimental: this routine is part of the long-term
+# public behavior of the program. When changing it, check callers, documentation, config
+# compatibility, session-log compatibility, and the parallel Bash/C implementation plans.
+# ------------------------------------------------------------
 def model_is_preview_or_experimental(model: ModelInfo) -> bool:
     text = " ".join([
         model.model_id or "",
@@ -703,6 +985,12 @@ def model_is_preview_or_experimental(model: ModelInfo) -> bool:
     return any(marker in text for marker in markers)
 
 
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: def sort_models_for_browser
+# Maintainer note for sort_models_for_browser: this routine is part of the long-term public
+# behavior of the program. When changing it, check callers, documentation, config compatibility,
+# session-log compatibility, and the parallel Bash/C implementation plans.
+# ------------------------------------------------------------
 def sort_models_for_browser(models: List[ModelInfo], sort_mode: str) -> List[ModelInfo]:
     if sort_mode == "input":
         return sorted(models, key=lambda m: (model_token_value(m.input_token_limit), m.model_id.lower()), reverse=True)
@@ -713,6 +1001,11 @@ def sort_models_for_browser(models: List[ModelInfo], sort_mode: str) -> List[Mod
     return sorted(models, key=lambda m: m.model_id.lower())
 
 
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: def save_model_cache
+# Stores the model list locally so ordinary navigation does not ping Google. Cache files are not
+# authoritative; they are convenience snapshots.
+# ------------------------------------------------------------
 def save_model_cache(cfg: Config, models: List[ModelInfo]) -> None:
     cfg.model_cache_file.parent.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -722,6 +1015,11 @@ def save_model_cache(cfg: Config, models: List[ModelInfo]) -> None:
     cfg.model_cache_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: def load_model_cache
+# Reads cached model metadata. If the cache is stale or missing, present that fact clearly
+# rather than quietly forcing a network call.
+# ------------------------------------------------------------
 def load_model_cache(cfg: Config) -> Tuple[List[ModelInfo], Optional[str], str]:
     if not cfg.model_cache_file.exists():
         return [], "No cached model list found. Use 'Load/update model list from Google' first.", ""
@@ -737,12 +1035,23 @@ def load_model_cache(cfg: Config) -> Tuple[List[ModelInfo], Optional[str], str]:
     return models, None, updated_at
 
 
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: def model_has_preview_marker
+# Maintainer note for model_has_preview_marker: this routine is part of the long-term public
+# behavior of the program. When changing it, check callers, documentation, config compatibility,
+# session-log compatibility, and the parallel Bash/C implementation plans.
+# ------------------------------------------------------------
 def model_has_preview_marker(model: ModelInfo) -> bool:
     haystack = " ".join([model.model_id, model.display_name, model.description]).lower()
     markers = ("preview", "experimental", " exp", "-exp", "_exp", " beta", "-beta", "_beta")
     return any(marker in haystack for marker in markers)
 
 
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: def apply_model_filters
+# Filters model metadata for usability. This is the preferred alternative to autoscan/probing;
+# use capabilities and token limits before testing a selected model.
+# ------------------------------------------------------------
 def apply_model_filters(models: List[ModelInfo], model_filter: ModelFilter) -> List[ModelInfo]:
     filtered: List[ModelInfo] = []
 
@@ -771,6 +1080,12 @@ def apply_model_filters(models: List[ModelInfo], model_filter: ModelFilter) -> L
     return filtered
 
 
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: def describe_model_filter
+# Maintainer note for describe_model_filter: this routine is part of the long-term public
+# behavior of the program. When changing it, check callers, documentation, config compatibility,
+# session-log compatibility, and the parallel Bash/C implementation plans.
+# ------------------------------------------------------------
 def describe_model_filter(model_filter: ModelFilter) -> str:
     parts = []
     if model_filter.require_token_limits:
@@ -796,6 +1111,12 @@ def describe_model_filter(model_filter: ModelFilter) -> str:
 # ---------------------------------------------------------------------------
 
 
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: def model_token_value
+# Maintainer note for model_token_value: this routine is part of the long-term public behavior
+# of the program. When changing it, check callers, documentation, config compatibility, session-
+# log compatibility, and the parallel Bash/C implementation plans.
+# ------------------------------------------------------------
 def model_token_value(value: Optional[int]) -> int:
     try:
         if value is None:
@@ -805,19 +1126,43 @@ def model_token_value(value: Optional[int]) -> int:
         return 0
 
 
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: def model_supports_generate_content
+# Maintainer note for model_supports_generate_content: this routine is part of the long-term
+# public behavior of the program. When changing it, check callers, documentation, config
+# compatibility, session-log compatibility, and the parallel Bash/C implementation plans.
+# ------------------------------------------------------------
 def model_supports_generate_content(model: ModelInfo) -> bool:
     return "generateContent" in (model.methods or [])
 
 
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: def model_has_required_token_limits
+# Maintainer note for model_has_required_token_limits: this routine is part of the long-term
+# public behavior of the program. When changing it, check callers, documentation, config
+# compatibility, session-log compatibility, and the parallel Bash/C implementation plans.
+# ------------------------------------------------------------
 def model_has_required_token_limits(model: ModelInfo) -> bool:
     return model_token_value(model.input_token_limit) > 0 and model_token_value(model.output_token_limit) > 0
 
 
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: def model_looks_preview
+# Maintainer note for model_looks_preview: this routine is part of the long-term public behavior
+# of the program. When changing it, check callers, documentation, config compatibility, session-
+# log compatibility, and the parallel Bash/C implementation plans.
+# ------------------------------------------------------------
 def model_looks_preview(model: ModelInfo) -> bool:
     text = " ".join([model.model_id or "", model.display_name or "", model.api_name or "", model.description or ""]).lower()
     return any(token in text for token in ["preview", "experimental", " exp", "-exp", "_exp", " beta", "-beta", "_beta"])
 
 
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: def sort_model_list
+# Maintainer note for sort_model_list: this routine is part of the long-term public behavior of
+# the program. When changing it, check callers, documentation, config compatibility, session-log
+# compatibility, and the parallel Bash/C implementation plans.
+# ------------------------------------------------------------
 def sort_model_list(cfg: Config, models: List[ModelInfo]) -> List[ModelInfo]:
     if cfg.model_sort_order == "name":
         return sorted(models, key=lambda model: model.model_id.lower())
@@ -830,6 +1175,12 @@ def sort_model_list(cfg: Config, models: List[ModelInfo]) -> List[ModelInfo]:
     return list(models)
 
 
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: def filter_model_list
+# Maintainer note for filter_model_list: this routine is part of the long-term public behavior
+# of the program. When changing it, check callers, documentation, config compatibility, session-
+# log compatibility, and the parallel Bash/C implementation plans.
+# ------------------------------------------------------------
 def filter_model_list(cfg: Config, models: List[ModelInfo]) -> List[ModelInfo]:
     filtered = list(models)
     if cfg.model_filter_generate_content:
@@ -845,6 +1196,12 @@ def filter_model_list(cfg: Config, models: List[ModelInfo]) -> List[ModelInfo]:
     return sort_model_list(cfg, filtered)
 
 
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: def model_filter_summary
+# Maintainer note for model_filter_summary: this routine is part of the long-term public
+# behavior of the program. When changing it, check callers, documentation, config compatibility,
+# session-log compatibility, and the parallel Bash/C implementation plans.
+# ------------------------------------------------------------
 def model_filter_summary(cfg: Config, before_count: int, after_count: int) -> str:
     flags = []
     if cfg.model_filter_generate_content:
@@ -859,6 +1216,12 @@ def model_filter_summary(cfg: Config, before_count: int, after_count: int) -> st
     return f"Showing {after_count}/{before_count} models | " + ", ".join(flags)
 
 
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: def model_badges
+# Maintainer note for model_badges: this routine is part of the long-term public behavior of the
+# program. When changing it, check callers, documentation, config compatibility, session-log
+# compatibility, and the parallel Bash/C implementation plans.
+# ------------------------------------------------------------
 def model_badges(model: ModelInfo) -> str:
     badges = []
     if model_supports_generate_content(model):
@@ -870,6 +1233,12 @@ def model_badges(model: ModelInfo) -> str:
     return "/".join(badges) or "metadata"
 
 
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: def print_model_rows
+# Maintainer note for print_model_rows: this routine is part of the long-term public behavior of
+# the program. When changing it, check callers, documentation, config compatibility, session-log
+# compatibility, and the parallel Bash/C implementation plans.
+# ------------------------------------------------------------
 def print_model_rows(models: List[ModelInfo]) -> None:
     for model in models:
         print(
@@ -881,6 +1250,12 @@ def print_model_rows(models: List[ModelInfo]) -> None:
         )
 
 
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: def update_models_command
+# Maintainer note for update_models_command: this routine is part of the long-term public
+# behavior of the program. When changing it, check callers, documentation, config compatibility,
+# session-log compatibility, and the parallel Bash/C implementation plans.
+# ------------------------------------------------------------
 def update_models_command(cfg: Config) -> int:
     models, error = fetch_models(cfg)
     if error:
@@ -894,6 +1269,12 @@ def update_models_command(cfg: Config) -> int:
     return 0
 
 
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: def print_models
+# Maintainer note for print_models: this routine is part of the long-term public behavior of the
+# program. When changing it, check callers, documentation, config compatibility, session-log
+# compatibility, and the parallel Bash/C implementation plans.
+# ------------------------------------------------------------
 def print_models(cfg: Config, update: bool = False) -> int:
     if update:
         models, error = fetch_models(cfg)
@@ -921,6 +1302,12 @@ def print_models(cfg: Config, update: bool = False) -> int:
     return 0
 
 
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: def print_model_test
+# Maintainer note for print_model_test: this routine is part of the long-term public behavior of
+# the program. When changing it, check callers, documentation, config compatibility, session-log
+# compatibility, and the parallel Bash/C implementation plans.
+# ------------------------------------------------------------
 def print_model_test(cfg: Config, model_id: str) -> int:
     attachment_dir = cfg.effective_attachment_dir
     ok, text = generate_with_model(cfg, model_id, cfg.model_test_prompt, "model-test", attachment_dir, [], timeout=60)
@@ -941,31 +1328,66 @@ SNAPSHOT_PREFIX = "CONTEXT_SNAPSHOT_JSON "
 
 
 @dataclass
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: class LogEntry
+# Maintainer note for LogEntry: this routine is part of the long-term public behavior of the
+# program. When changing it, check callers, documentation, config compatibility, session-log
+# compatibility, and the parallel Bash/C implementation plans.
+# ------------------------------------------------------------
 class LogEntry:
     timestamp: str
     speaker: str
     text: str
 
 
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: def now_time
+# Maintainer note for now_time: this routine is part of the long-term public behavior of the
+# program. When changing it, check callers, documentation, config compatibility, session-log
+# compatibility, and the parallel Bash/C implementation plans.
+# ------------------------------------------------------------
 def now_time() -> str:
     return datetime.now().strftime("%H:%M:%S")
 
 
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: def append_log
+# Maintainer note for append_log: this routine is part of the long-term public behavior of the
+# program. When changing it, check callers, documentation, config compatibility, session-log
+# compatibility, and the parallel Bash/C implementation plans.
+# ------------------------------------------------------------
 def append_log(path: Path, speaker: str, text: str, timestamp: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as fh:
         fh.write(f"[{timestamp}] {speaker}: {text}\n")
 
 
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: def append_context_snapshot
+# Maintainer note for append_context_snapshot: this routine is part of the long-term public
+# behavior of the program. When changing it, check callers, documentation, config compatibility,
+# session-log compatibility, and the parallel Bash/C implementation plans.
+# ------------------------------------------------------------
 def append_context_snapshot(path: Path, context_buffer: List[str]) -> None:
     snapshot = SNAPSHOT_PREFIX + json.dumps(context_buffer, ensure_ascii=False)
     append_log(path, "system", snapshot, now_time())
 
 
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: def is_snapshot_entry
+# Maintainer note for is_snapshot_entry: this routine is part of the long-term public behavior
+# of the program. When changing it, check callers, documentation, config compatibility, session-
+# log compatibility, and the parallel Bash/C implementation plans.
+# ------------------------------------------------------------
 def is_snapshot_entry(entry: LogEntry) -> bool:
     return entry.speaker == "system" and entry.text.startswith(SNAPSHOT_PREFIX)
 
 
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: def load_log_entries
+# Parses the human-readable session log. The log format is part of the project contract; change
+# it cautiously and preserve backward compatibility.
+# ------------------------------------------------------------
 def load_log_entries(path: Path) -> List[LogEntry]:
     if not path.exists():
         return []
@@ -995,6 +1417,11 @@ def load_log_entries(path: Path) -> List[LogEntry]:
     return entries
 
 
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: def latest_context_snapshot
+# Finds saved memory snapshots. This lets resumed sessions restore context without replaying
+# every line in a long log.
+# ------------------------------------------------------------
 def latest_context_snapshot(entries: List[LogEntry]) -> Optional[List[str]]:
     for entry in reversed(entries):
         if not is_snapshot_entry(entry):
@@ -1023,6 +1450,12 @@ EXT_MAP = {
 FENCE_RE = re.compile(r"```([A-Za-z0-9_+.#-]*)[ \t]*\n(.*?)```", re.DOTALL)
 
 
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: def safe_attachment_tag
+# Maintainer note for safe_attachment_tag: this routine is part of the long-term public behavior
+# of the program. When changing it, check callers, documentation, config compatibility, session-
+# log compatibility, and the parallel Bash/C implementation plans.
+# ------------------------------------------------------------
 def safe_attachment_tag(lang: str) -> str:
     lang = lang.strip().lower() or "text"
     lang = lang.replace("+", "p").replace("#", "sharp")
@@ -1030,6 +1463,12 @@ def safe_attachment_tag(lang: str) -> str:
     return lang or "text"
 
 
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: def next_attachment_number
+# Maintainer note for next_attachment_number: this routine is part of the long-term public
+# behavior of the program. When changing it, check callers, documentation, config compatibility,
+# session-log compatibility, and the parallel Bash/C implementation plans.
+# ------------------------------------------------------------
 def next_attachment_number(attachment_dir: Path, session_name: str, lang: str, ext: str) -> int:
     pattern = re.compile(rf"^{re.escape(session_name)}-{re.escape(lang)}-(\d{{2,}}){re.escape(ext)}$")
     highest = 0
@@ -1040,9 +1479,20 @@ def next_attachment_number(attachment_dir: Path, session_name: str, lang: str, e
     return highest + 1
 
 
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: def extract_code_attachments
+# Converts fenced code blocks into files. This keeps the transcript readable while preserving
+# useful artifacts for editors and shells.
+# ------------------------------------------------------------
 def extract_code_attachments(text: str, attachment_dir: Path, session_name: str) -> str:
     attachment_dir.mkdir(parents=True, exist_ok=True)
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def replacement
+    # Maintainer note for replacement: this routine is part of the long-term public behavior of
+    # the program. When changing it, check callers, documentation, config compatibility,
+    # session-log compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def replacement(match: re.Match[str]) -> str:
         raw_lang = match.group(1).strip().lower() or "text"
         lang = safe_attachment_tag(raw_lang)
@@ -1062,6 +1512,12 @@ def extract_code_attachments(text: str, attachment_dir: Path, session_name: str)
 # ---------------------------------------------------------------------------
 
 
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: def wrap_for_width
+# Maintainer note for wrap_for_width: this routine is part of the long-term public behavior of
+# the program. When changing it, check callers, documentation, config compatibility, session-log
+# compatibility, and the parallel Bash/C implementation plans.
+# ------------------------------------------------------------
 def wrap_for_width(text: str, width: int) -> List[str]:
     width = max(1, width)
     result: List[str] = []
@@ -1083,6 +1539,12 @@ def wrap_for_width(text: str, width: int) -> List[str]:
 
 
 @dataclass
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: class TranscriptItem
+# Maintainer note for TranscriptItem: this routine is part of the long-term public behavior of
+# the program. When changing it, check callers, documentation, config compatibility, session-log
+# compatibility, and the parallel Bash/C implementation plans.
+# ------------------------------------------------------------
 class TranscriptItem:
     speaker: str
     text: str
@@ -1090,6 +1552,12 @@ class TranscriptItem:
 
 
 @dataclass
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: class InputSegment
+# Maintainer note for InputSegment: this routine is part of the long-term public behavior of the
+# program. When changing it, check callers, documentation, config compatibility, session-log
+# compatibility, and the parallel Bash/C implementation plans.
+# ------------------------------------------------------------
 class InputSegment:
     display: str
     logical_row: int
@@ -1102,10 +1570,22 @@ class InputSegment:
 # ---------------------------------------------------------------------------
 
 
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: class GeminiCursesApp
+# Main ncurses application object. It owns UI state, transcript state, input state, and
+# navigation. Keep external API/config/storage helpers outside when possible so the future C
+# implementation can mirror the architecture.
+# ------------------------------------------------------------
 class GeminiCursesApp:
     INPUT_HEIGHT = 6
     TRANSCRIPT_REPLAY_LIMIT = 80
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def __init__
+    # Maintainer note for __init__: this routine is part of the long-term public behavior of the
+    # program. When changing it, check callers, documentation, config compatibility, session-log
+    # compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def __init__(self, cfg: Config, session_name: str, session_path: Path):
         self.cfg = cfg
         self.session_name = session_name
@@ -1144,6 +1624,12 @@ class GeminiCursesApp:
         self.startup_notice_active = False
         self.first_user_message_sent = False
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def default_status
+    # Maintainer note for default_status: this routine is part of the long-term public behavior
+    # of the program. When changing it, check callers, documentation, config compatibility,
+    # session-log compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def default_status(self) -> str:
         return "F1 Menu | Ctrl+G Send | F10 Quit"
 
@@ -1151,6 +1637,12 @@ class GeminiCursesApp:
     # Context memory
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def load_session_into_ui
+    # Maintainer note for load_session_into_ui: this routine is part of the long-term public
+    # behavior of the program. When changing it, check callers, documentation, config
+    # compatibility, session-log compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def load_session_into_ui(self) -> None:
         entries = load_log_entries(self.session_path)
         if not entries:
@@ -1178,6 +1670,12 @@ class GeminiCursesApp:
         self.trim_context_buffer()
         self.status = f"loaded session: {self.session_name}"
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def reset_to_session
+    # Maintainer note for reset_to_session: this routine is part of the long-term public
+    # behavior of the program. When changing it, check callers, documentation, config
+    # compatibility, session-log compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def reset_to_session(self, session_name: str, session_path: Path) -> None:
         self.session_name = session_name
         self.session_path = session_path
@@ -1188,14 +1686,32 @@ class GeminiCursesApp:
         self.first_user_message_sent = False
         self.load_session_into_ui()
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def trim_context_buffer
+    # Maintainer note for trim_context_buffer: this routine is part of the long-term public
+    # behavior of the program. When changing it, check callers, documentation, config
+    # compatibility, session-log compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def trim_context_buffer(self) -> None:
         max_entries = self.cfg.context_turns * 2
         if len(self.context_buffer) > max_entries:
             self.context_buffer = self.context_buffer[-max_entries:]
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def build_context
+    # Maintainer note for build_context: this routine is part of the long-term public behavior
+    # of the program. When changing it, check callers, documentation, config compatibility,
+    # session-log compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def build_context(self) -> str:
         return "\n".join(self.context_buffer)
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def save_context_snapshot
+    # Maintainer note for save_context_snapshot: this routine is part of the long-term public
+    # behavior of the program. When changing it, check callers, documentation, config
+    # compatibility, session-log compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def save_context_snapshot(self) -> None:
         append_context_snapshot(self.session_path, self.context_buffer)
 
@@ -1203,20 +1719,50 @@ class GeminiCursesApp:
     # Curses drawing and style helpers
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def dim_attr
+    # Maintainer note for dim_attr: this routine is part of the long-term public behavior of the
+    # program. When changing it, check callers, documentation, config compatibility, session-log
+    # compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def dim_attr(self) -> int:
         return 0 if self.cfg.monochrome else curses.A_DIM
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def reverse_attr
+    # Maintainer note for reverse_attr: this routine is part of the long-term public behavior of
+    # the program. When changing it, check callers, documentation, config compatibility,
+    # session-log compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def reverse_attr(self) -> int:
         return curses.A_REVERSE
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def attr_header
+    # Maintainer note for attr_header: this routine is part of the long-term public behavior of
+    # the program. When changing it, check callers, documentation, config compatibility,
+    # session-log compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def attr_header(self) -> int:
         # Compatibility helper for menus that use header-style reverse video.
         return self.reverse_attr()
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def attr_dim
+    # Maintainer note for attr_dim: this routine is part of the long-term public behavior of the
+    # program. When changing it, check callers, documentation, config compatibility, session-log
+    # compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def attr_dim(self) -> int:
         # Compatibility helper for menus that use dim/grey metadata styling.
         return self.dim_attr()
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def transcript_attr_for
+    # Maintainer note for transcript_attr_for: this routine is part of the long-term public
+    # behavior of the program. When changing it, check callers, documentation, config
+    # compatibility, session-log compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def transcript_attr_for(self, speaker: str) -> int:
         if self.cfg.monochrome:
             return 0
@@ -1226,12 +1772,24 @@ class GeminiCursesApp:
             return self.dim_attr()
         return 0
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def maybe_show_startup_notice
+    # Maintainer note for maybe_show_startup_notice: this routine is part of the long-term
+    # public behavior of the program. When changing it, check callers, documentation, config
+    # compatibility, session-log compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def maybe_show_startup_notice(self) -> None:
         if not self.cfg.startup_notice:
             return
         self.startup_notice_active = True
         self.transcript.append(TranscriptItem("remfan1994", PROJECT_NOTICE, now_time()))
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def remove_startup_notice
+    # Maintainer note for remove_startup_notice: this routine is part of the long-term public
+    # behavior of the program. When changing it, check callers, documentation, config
+    # compatibility, session-log compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def remove_startup_notice(self) -> None:
         if not self.startup_notice_active:
             return
@@ -1241,6 +1799,12 @@ class GeminiCursesApp:
         ]
         self.startup_notice_active = False
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def safe_addstr
+    # Maintainer note for safe_addstr: this routine is part of the long-term public behavior of
+    # the program. When changing it, check callers, documentation, config compatibility,
+    # session-log compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def safe_addstr(self, y: int, x: int, text: str, max_width: Optional[int] = None, attr: int = 0) -> None:
         height, width = self.stdscr.getmaxyx()
         if y < 0 or y >= height or x < 0 or x >= width:
@@ -1255,6 +1819,12 @@ class GeminiCursesApp:
         except curses.error:
             pass
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def transcript_display_lines
+    # Maintainer note for transcript_display_lines: this routine is part of the long-term public
+    # behavior of the program. When changing it, check callers, documentation, config
+    # compatibility, session-log compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def transcript_display_lines(self, width: int) -> List[Tuple[str, int]]:
         lines: List[Tuple[str, int]] = []
         for item in self.transcript:
@@ -1266,11 +1836,23 @@ class GeminiCursesApp:
             lines.append(("", 0))
         return lines
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def model_label
+    # Maintainer note for model_label: this routine is part of the long-term public behavior of
+    # the program. When changing it, check callers, documentation, config compatibility,
+    # session-log compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def model_label(self) -> str:
         if self.cfg.model:
             return self.cfg.model
         return f"{FALLBACK_MODEL} (fallback)"
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def draw_header
+    # Maintainer note for draw_header: this routine is part of the long-term public behavior of
+    # the program. When changing it, check callers, documentation, config compatibility,
+    # session-log compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def draw_header(self, width: int) -> None:
         key_state = "key:loaded" if self.cfg.api_key else "key:missing"
         attach_state = f" files:{len(self.pending_attachments)}" if self.pending_attachments else ""
@@ -1278,6 +1860,12 @@ class GeminiCursesApp:
         self.safe_addstr(0, 0, header, width, self.reverse_attr())
         self.safe_addstr(1, 0, "_" * width, width, self.dim_attr())
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def draw_transcript
+    # Maintainer note for draw_transcript: this routine is part of the long-term public behavior
+    # of the program. When changing it, check callers, documentation, config compatibility,
+    # session-log compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def draw_transcript(self, start_y: int, height: int, width: int) -> None:
         lines = self.transcript_display_lines(width)
         max_scroll = max(0, len(lines) - height)
@@ -1289,6 +1877,12 @@ class GeminiCursesApp:
                 text, attr = visible[offset]
                 self.safe_addstr(start_y + offset, 0, text, width, attr)
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def input_segments
+    # Maintainer note for input_segments: this routine is part of the long-term public behavior
+    # of the program. When changing it, check callers, documentation, config compatibility,
+    # session-log compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def input_segments(self, width: int) -> Tuple[List[InputSegment], int, int]:
         marker_width = 2
         available = max(1, width - marker_width)
@@ -1313,6 +1907,12 @@ class GeminiCursesApp:
 
         return segments or [InputSegment("> ", 0, 0, max(1, width - 2))], cursor_visual_index, cursor_x
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def command_bar_items
+    # Maintainer note for command_bar_items: this routine is part of the long-term public
+    # behavior of the program. When changing it, check callers, documentation, config
+    # compatibility, session-log compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def command_bar_items(self) -> List[Tuple[str, str]]:
         return [
             ("F1 Help", "help"),
@@ -1326,6 +1926,12 @@ class GeminiCursesApp:
             ("F9 Credits", "credits"),
         ]
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def draw_command_bar
+    # Maintainer note for draw_command_bar: this routine is part of the long-term public
+    # behavior of the program. When changing it, check callers, documentation, config
+    # compatibility, session-log compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def draw_command_bar(self, y: int, width: int) -> None:
         # This compact command strip sits between transcript and input. It is
         # intentionally clipped to the available terminal width; only visible
@@ -1345,6 +1951,12 @@ class GeminiCursesApp:
             self.command_click_targets.append((label_start, label_end, action))
             x += len(text)
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def draw_input
+    # Maintainer note for draw_input: this routine is part of the long-term public behavior of
+    # the program. When changing it, check callers, documentation, config compatibility,
+    # session-log compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def draw_input(self, label_y: int, input_y: int, width: int) -> None:
         self.draw_command_bar(label_y, width)
 
@@ -1380,10 +1992,22 @@ class GeminiCursesApp:
         except curses.error:
             pass
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def draw_status
+    # Maintainer note for draw_status: this routine is part of the long-term public behavior of
+    # the program. When changing it, check callers, documentation, config compatibility,
+    # session-log compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def draw_status(self, y: int, width: int) -> None:
         self.safe_addstr(y, 0, "_" * width, width, self.dim_attr())
         self.safe_addstr(y, 0, self.status, width, self.reverse_attr())
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def draw
+    # Maintainer note for draw: this routine is part of the long-term public behavior of the
+    # program. When changing it, check callers, documentation, config compatibility, session-log
+    # compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def draw(self) -> None:
         self.stdscr.erase()
         height, width = self.stdscr.getmaxyx()
@@ -1423,6 +2047,12 @@ class GeminiCursesApp:
     # Mouse handling
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def mouse_wheel_delta
+    # Maintainer note for mouse_wheel_delta: this routine is part of the long-term public
+    # behavior of the program. When changing it, check callers, documentation, config
+    # compatibility, session-log compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def mouse_wheel_delta(self, state: int) -> int:
         if state & getattr(curses, "BUTTON4_PRESSED", 0):
             return 1
@@ -1430,6 +2060,12 @@ class GeminiCursesApp:
             return -1
         return 0
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def mouse_button1
+    # Maintainer note for mouse_button1: this routine is part of the long-term public behavior
+    # of the program. When changing it, check callers, documentation, config compatibility,
+    # session-log compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def mouse_button1(self, state: int) -> bool:
         masks = [
             getattr(curses, "BUTTON1_PRESSED", 0),
@@ -1439,9 +2075,21 @@ class GeminiCursesApp:
         ]
         return any(state & mask for mask in masks)
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def mouse_button1_double
+    # Maintainer note for mouse_button1_double: this routine is part of the long-term public
+    # behavior of the program. When changing it, check callers, documentation, config
+    # compatibility, session-log compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def mouse_button1_double(self, state: int) -> bool:
         return bool(state & getattr(curses, "BUTTON1_DOUBLE_CLICKED", 0))
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def handle_mouse
+    # Maintainer note for handle_mouse: this routine is part of the long-term public behavior of
+    # the program. When changing it, check callers, documentation, config compatibility,
+    # session-log compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def handle_mouse(self) -> None:
         try:
             _mouse_id, x, y, _z, state = curses.getmouse()
@@ -1471,6 +2119,12 @@ class GeminiCursesApp:
                 self.place_cursor_from_mouse(x, y - input_y)
                 self.status = "mouse: input cursor placed"
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def place_cursor_from_mouse
+    # Maintainer note for place_cursor_from_mouse: this routine is part of the long-term public
+    # behavior of the program. When changing it, check callers, documentation, config
+    # compatibility, session-log compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def place_cursor_from_mouse(self, x: int, visible_row: int) -> None:
         index = self.input_scroll + visible_row
         if index < 0 or index >= len(self.last_input_segments):
@@ -1486,6 +2140,12 @@ class GeminiCursesApp:
     # Generic modals and external editor
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def show_message
+    # Maintainer note for show_message: this routine is part of the long-term public behavior of
+    # the program. When changing it, check callers, documentation, config compatibility,
+    # session-log compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def show_message(self, title: str, lines: List[str]) -> None:
         """Show a resolution-safe full-screen scrollable page.
 
@@ -1548,6 +2208,12 @@ class GeminiCursesApp:
             if max_scroll == 0:
                 return
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def ask_yes_no
+    # Maintainer note for ask_yes_no: this routine is part of the long-term public behavior of
+    # the program. When changing it, check callers, documentation, config compatibility,
+    # session-log compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def ask_yes_no(self, title: str, message: str, default: bool = False) -> bool:
         while True:
             self.stdscr.erase()
@@ -1587,6 +2253,12 @@ class GeminiCursesApp:
             if ch in (10, 13, curses.KEY_ENTER):
                 return default
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def text_input_modal
+    # Maintainer note for text_input_modal: this routine is part of the long-term public
+    # behavior of the program. When changing it, check callers, documentation, config
+    # compatibility, session-log compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def text_input_modal(self, title: str, prompt: str, initial: str = "", secret: bool = False) -> Optional[str]:
         value = initial
         cursor = len(value)
@@ -1638,9 +2310,15 @@ class GeminiCursesApp:
                 value = value[:cursor] + chr(ch) + value[cursor:]
                 cursor += 1
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def run_external_editor
+    # Maintainer note for run_external_editor: this routine is part of the long-term public
+    # behavior of the program. When changing it, check callers, documentation, config
+    # compatibility, session-log compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def run_external_editor(self, initial_text: str, suffix: str = ".txt") -> Optional[str]:
         editor = self.cfg.effective_editor
-        fd, path_str = tempfile.mkstemp(prefix="gemini-curses-", suffix=suffix)
+        fd, path_str = tempfile.mkstemp(prefix="gemini-ncurses-python-", suffix=suffix)
         path = Path(path_str)
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
@@ -1666,6 +2344,12 @@ class GeminiCursesApp:
     # High-level feature screens
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def command_items
+    # Maintainer note for command_items: this routine is part of the long-term public behavior
+    # of the program. When changing it, check callers, documentation, config compatibility,
+    # session-log compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def command_items(self) -> List[Tuple[str, str, str]]:
         return [
             ("F1", "Help / command menu", "noop"),
@@ -1682,6 +2366,12 @@ class GeminiCursesApp:
             ("F10", "Quit", "quit"),
         ]
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def run_command
+    # Maintainer note for run_command: this routine is part of the long-term public behavior of
+    # the program. When changing it, check callers, documentation, config compatibility,
+    # session-log compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def run_command(self, action: str) -> None:
         if action == "noop":
             return
@@ -1710,6 +2400,11 @@ class GeminiCursesApp:
         elif action == "quit":
             self.should_quit = True
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def open_help
+    # F1 command surface. This is not just documentation; it is a launch pad for the app
+    # features.
+    # ------------------------------------------------------------
     def open_help(self) -> None:
         # F1 is now an actionable command menu, not only a static help page.
         # Function keys work while this menu is open, Enter launches the
@@ -1807,6 +2502,12 @@ class GeminiCursesApp:
             elif ch == 7:
                 self.run_command("send"); return
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def open_doctor
+    # Maintainer note for open_doctor: this routine is part of the long-term public behavior of
+    # the program. When changing it, check callers, documentation, config compatibility,
+    # session-log compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def open_doctor(self) -> None:
         """Display the command-line doctor report inside ncurses.
 
@@ -1816,6 +2517,12 @@ class GeminiCursesApp:
         """
         self.show_message("DIAGNOSTICS", doctor_lines(self.cfg))
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def open_credits
+    # Maintainer note for open_credits: this routine is part of the long-term public behavior of
+    # the program. When changing it, check callers, documentation, config compatibility,
+    # session-log compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def open_credits(self) -> None:
         self.show_message("CREDITS", [
             "gemini-terminal-tools",
@@ -1829,6 +2536,12 @@ class GeminiCursesApp:
             PROJECT_NOTICE,
         ])
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def open_api_key_input
+    # Maintainer note for open_api_key_input: this routine is part of the long-term public
+    # behavior of the program. When changing it, check callers, documentation, config
+    # compatibility, session-log compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def open_api_key_input(self) -> None:
         key = self.text_input_modal("API KEY", "Paste Gemini API key. It is used for this run unless you choose to save it.", secret=True)
         if not key:
@@ -1844,6 +2557,12 @@ class GeminiCursesApp:
             self.cfg.api_key = ""
             self.status = "API key forgotten for this run"
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def show_model_info
+    # Maintainer note for show_model_info: this routine is part of the long-term public behavior
+    # of the program. When changing it, check callers, documentation, config compatibility,
+    # session-log compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def show_model_info(self, model: ModelInfo) -> None:
         self.show_message("MODEL INFO", [
             f"Model ID: {model.model_id}",
@@ -1856,6 +2575,12 @@ class GeminiCursesApp:
             model.description or "No description returned by API.",
         ])
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def test_model_interactive
+    # Maintainer note for test_model_interactive: this routine is part of the long-term public
+    # behavior of the program. When changing it, check callers, documentation, config
+    # compatibility, session-log compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def test_model_interactive(self, model: ModelInfo) -> None:
         if not self.cfg.api_key:
             self.show_message("MODEL TEST", ["No API key loaded. Press F3 first."])
@@ -1873,6 +2598,11 @@ class GeminiCursesApp:
                 set_config_value(self.cfg, "MODEL", model.model_id)
                 self.status = f"model saved: {model.model_id}"
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def open_model_selector
+    # F2 model workflow. It should separate local cached viewing from explicit network refreshes
+    # and keep testing user-operated.
+    # ------------------------------------------------------------
     def open_model_selector(self) -> None:
         """Open a local model-management menu without network access.
 
@@ -2005,6 +2735,12 @@ class GeminiCursesApp:
                 self.status = f"model saved: {normalize_model_id(self.cfg.effective_model)}"
                 continue
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def open_model_filter_menu
+    # Maintainer note for open_model_filter_menu: this routine is part of the long-term public
+    # behavior of the program. When changing it, check callers, documentation, config
+    # compatibility, session-log compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def open_model_filter_menu(self) -> None:
         """Edit model-list metadata filters.
 
@@ -2106,6 +2842,12 @@ class GeminiCursesApp:
                         set_config_value(self.cfg, key, str(self.cfg.model_min_output_tokens))
                     self.status = f"saved {key}"
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def open_model_list_selector
+    # Maintainer note for open_model_list_selector: this routine is part of the long-term public
+    # behavior of the program. When changing it, check callers, documentation, config
+    # compatibility, session-log compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def open_model_list_selector(self, models: List[ModelInfo], source_label: str = "model list") -> None:
         if not models:
             self.show_message("MODEL SELECTOR", ["No models available."])
@@ -2228,10 +2970,22 @@ class GeminiCursesApp:
             elif ch == curses.KEY_END:
                 selected = len(visible_models) - 1
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def session_names
+    # Maintainer note for session_names: this routine is part of the long-term public behavior
+    # of the program. When changing it, check callers, documentation, config compatibility,
+    # session-log compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def session_names(self) -> List[str]:
         self.cfg.session_dir.mkdir(parents=True, exist_ok=True)
         return sorted(path.stem for path in self.cfg.session_dir.glob("*.log"))
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def rename_session
+    # Maintainer note for rename_session: this routine is part of the long-term public behavior
+    # of the program. When changing it, check callers, documentation, config compatibility,
+    # session-log compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def rename_session(self, old_name: str, new_name: str) -> None:
         new_name = sanitize_session_name(new_name)
         old_path = self.cfg.session_dir / f"{old_name}.log"
@@ -2249,6 +3003,12 @@ class GeminiCursesApp:
             self.session_path = new_path
         self.status = f"renamed session: {old_name} -> {new_name}"
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def open_session_browser
+    # Maintainer note for open_session_browser: this routine is part of the long-term public
+    # behavior of the program. When changing it, check callers, documentation, config
+    # compatibility, session-log compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def open_session_browser(self) -> None:
         selected = 0
         top_index = 0
@@ -2322,6 +3082,11 @@ class GeminiCursesApp:
             elif ch == curses.KEY_NPAGE:
                 selected = min(len(names) - 1, selected + visible_h)
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def open_options_menu
+    # Options UI. This should behave like a friendly form, not like dumping users into raw
+    # config editing.
+    # ------------------------------------------------------------
     def open_options_menu(self) -> None:
         """w3m-style options form.
 
@@ -2335,6 +3100,13 @@ class GeminiCursesApp:
         editing = False
         edit_value = ""
 
+        # ------------------------------------------------------------
+        # MAINTAINER COMMENTARY: def current_fields
+        # Maintainer note for current_fields: this routine is part of the long-term public
+        # behavior of the program. When changing it, check callers, documentation, config
+        # compatibility, session-log compatibility, and the parallel Bash/C implementation
+        # plans.
+        # ------------------------------------------------------------
         def current_fields() -> List[dict]:
             return [
                 {"key": "MODEL", "label": "Model", "kind": "text", "value": self.cfg.model},
@@ -2355,6 +3127,12 @@ class GeminiCursesApp:
                 {"key": "STARTUP_NOTICE", "label": "Startup Project Lead notice", "kind": "bool", "value": self.cfg.startup_notice},
             ]
 
+        # ------------------------------------------------------------
+        # MAINTAINER COMMENTARY: def apply_field
+        # Maintainer note for apply_field: this routine is part of the long-term public behavior
+        # of the program. When changing it, check callers, documentation, config compatibility,
+        # session-log compatibility, and the parallel Bash/C implementation plans.
+        # ------------------------------------------------------------
         def apply_field(key: str, value: object) -> None:
             if key == "MODEL":
                 self.cfg.model = normalize_model_id(str(value))
@@ -2521,6 +3299,12 @@ class GeminiCursesApp:
                     editing = True
                     edit_value = str(field["value"])
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def open_memory_menu
+    # Maintainer note for open_memory_menu: this routine is part of the long-term public
+    # behavior of the program. When changing it, check callers, documentation, config
+    # compatibility, session-log compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def open_memory_menu(self) -> None:
         while True:
             self.stdscr.erase()
@@ -2566,6 +3350,12 @@ class GeminiCursesApp:
                 self.status = "memory rebuilt from log"
                 return
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def file_picker
+    # Maintainer note for file_picker: this routine is part of the long-term public behavior of
+    # the program. When changing it, check callers, documentation, config compatibility,
+    # session-log compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def file_picker(self, start_dir: Path, title: str) -> Optional[Path]:
         current = start_dir.expanduser().resolve()
         selected = 0
@@ -2616,6 +3406,11 @@ class GeminiCursesApp:
                 else:
                     return chosen
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def open_file_menu
+    # File and attachment workflow. Keep user-visible file actions explicit because media
+    # compatibility depends on the chosen model/API behavior.
+    # ------------------------------------------------------------
     def open_file_menu(self) -> None:
         choices = [
             ("a", "attach file for next Gemini request"),
@@ -2688,6 +3483,12 @@ class GeminiCursesApp:
                     self.run_external_editor(path.read_text(encoding="utf-8", errors="replace") if path.stat().st_size < 2_000_000 else f"Binary/large file: {path}")
                     return
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def detected_editors
+    # Maintainer note for detected_editors: this routine is part of the long-term public
+    # behavior of the program. When changing it, check callers, documentation, config
+    # compatibility, session-log compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def detected_editors(self) -> List[Tuple[str, str]]:
         """Return common editors that are actually runnable from PATH.
 
@@ -2706,6 +3507,12 @@ class GeminiCursesApp:
                 seen.add(path)
         return found
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def browse_for_editor
+    # Maintainer note for browse_for_editor: this routine is part of the long-term public
+    # behavior of the program. When changing it, check callers, documentation, config
+    # compatibility, session-log compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def browse_for_editor(self) -> Optional[str]:
         """Browse common executable directories for an editor command.
 
@@ -2719,6 +3526,11 @@ class GeminiCursesApp:
                     return str(chosen)
         return None
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def open_editor_menu
+    # External editor chooser. This supports Unix-style composition workflows similar to mail
+    # clients such as mutt.
+    # ------------------------------------------------------------
     def open_editor_menu(self) -> None:
         """Open a menu for choosing, saving, browsing, and launching editors.
 
@@ -2826,6 +3638,12 @@ class GeminiCursesApp:
                 self.status = "input loaded from external editor"
             return
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def open_external_editor_for_input
+    # Maintainer note for open_external_editor_for_input: this routine is part of the long-term
+    # public behavior of the program. When changing it, check callers, documentation, config
+    # compatibility, session-log compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def open_external_editor_for_input(self) -> None:
         self.open_editor_menu()
 
@@ -2833,11 +3651,23 @@ class GeminiCursesApp:
     # Input editing and sending
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def insert_text
+    # Maintainer note for insert_text: this routine is part of the long-term public behavior of
+    # the program. When changing it, check callers, documentation, config compatibility,
+    # session-log compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def insert_text(self, text: str) -> None:
         line = self.input_lines[self.cursor_row]
         self.input_lines[self.cursor_row] = line[: self.cursor_col] + text + line[self.cursor_col:]
         self.cursor_col += len(text)
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def insert_newline
+    # Maintainer note for insert_newline: this routine is part of the long-term public behavior
+    # of the program. When changing it, check callers, documentation, config compatibility,
+    # session-log compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def insert_newline(self) -> None:
         line = self.input_lines[self.cursor_row]
         self.input_lines[self.cursor_row] = line[: self.cursor_col]
@@ -2845,6 +3675,12 @@ class GeminiCursesApp:
         self.cursor_row += 1
         self.cursor_col = 0
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def backspace
+    # Maintainer note for backspace: this routine is part of the long-term public behavior of
+    # the program. When changing it, check callers, documentation, config compatibility,
+    # session-log compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def backspace(self) -> None:
         if self.cursor_col > 0:
             line = self.input_lines[self.cursor_row]
@@ -2857,6 +3693,12 @@ class GeminiCursesApp:
             self.cursor_row -= 1
             self.cursor_col = previous_len
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def delete_forward
+    # Maintainer note for delete_forward: this routine is part of the long-term public behavior
+    # of the program. When changing it, check callers, documentation, config compatibility,
+    # session-log compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def delete_forward(self) -> None:
         line = self.input_lines[self.cursor_row]
         if self.cursor_col < len(line):
@@ -2865,29 +3707,70 @@ class GeminiCursesApp:
             self.input_lines[self.cursor_row] += self.input_lines[self.cursor_row + 1]
             del self.input_lines[self.cursor_row + 1]
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def move_left
+    # Maintainer note for move_left: this routine is part of the long-term public behavior of
+    # the program. When changing it, check callers, documentation, config compatibility,
+    # session-log compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def move_left(self) -> None:
         if self.cursor_col > 0: self.cursor_col -= 1
         elif self.cursor_row > 0: self.cursor_row -= 1; self.cursor_col = len(self.input_lines[self.cursor_row])
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def move_right
+    # Maintainer note for move_right: this routine is part of the long-term public behavior of
+    # the program. When changing it, check callers, documentation, config compatibility,
+    # session-log compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def move_right(self) -> None:
         line = self.input_lines[self.cursor_row]
         if self.cursor_col < len(line): self.cursor_col += 1
         elif self.cursor_row < len(self.input_lines) - 1: self.cursor_row += 1; self.cursor_col = 0
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def move_up
+    # Maintainer note for move_up: this routine is part of the long-term public behavior of the
+    # program. When changing it, check callers, documentation, config compatibility, session-log
+    # compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def move_up(self) -> None:
         if self.cursor_row > 0:
             self.cursor_row -= 1; self.cursor_col = min(self.cursor_col, len(self.input_lines[self.cursor_row]))
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def move_down
+    # Maintainer note for move_down: this routine is part of the long-term public behavior of
+    # the program. When changing it, check callers, documentation, config compatibility,
+    # session-log compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def move_down(self) -> None:
         if self.cursor_row < len(self.input_lines) - 1:
             self.cursor_row += 1; self.cursor_col = min(self.cursor_col, len(self.input_lines[self.cursor_row]))
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def clear_input
+    # Maintainer note for clear_input: this routine is part of the long-term public behavior of
+    # the program. When changing it, check callers, documentation, config compatibility,
+    # session-log compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def clear_input(self) -> None:
         self.input_lines = [""]; self.cursor_row = 0; self.cursor_col = 0; self.input_scroll = 0
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def current_input
+    # Maintainer note for current_input: this routine is part of the long-term public behavior
+    # of the program. When changing it, check callers, documentation, config compatibility,
+    # session-log compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def current_input(self) -> str:
         return "\n".join(self.input_lines).strip("\n")
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def send_current_message
+    # Message send path. This is where UI text becomes session log entries, memory context,
+    # Gemini request parts, and visible transcript output.
+    # ------------------------------------------------------------
     def send_current_message(self) -> None:
         message = self.current_input()
         if not message.strip() and not self.pending_attachments:
@@ -2929,6 +3812,12 @@ class GeminiCursesApp:
     # Command dispatch
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def action_for_function_key
+    # Maintainer note for action_for_function_key: this routine is part of the long-term public
+    # behavior of the program. When changing it, check callers, documentation, config
+    # compatibility, session-log compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def action_for_function_key(self, ch: int) -> Optional[str]:
         mapping = {
             curses.KEY_F1: "help",
@@ -2944,6 +3833,12 @@ class GeminiCursesApp:
         }
         return mapping.get(ch)
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def dispatch_command_action
+    # Maintainer note for dispatch_command_action: this routine is part of the long-term public
+    # behavior of the program. When changing it, check callers, documentation, config
+    # compatibility, session-log compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def dispatch_command_action(self, action: str) -> None:
         if action == "help":
             self.open_help()
@@ -2968,6 +3863,12 @@ class GeminiCursesApp:
         elif action == "quit":
             self.should_quit = True
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def handle_global_hotkey
+    # Global function-key routing. This is critical for usability: users should be able to jump
+    # from any feature screen to any other feature screen without first escaping back to the
+    # main chat.
+    # ------------------------------------------------------------
     def handle_global_hotkey(self, ch: int, current_action: Optional[str] = None) -> bool:
         """Allow F-key navigation from feature screens.
 
@@ -2988,6 +3889,12 @@ class GeminiCursesApp:
     # Main event loop
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def handle_key
+    # Maintainer note for handle_key: this routine is part of the long-term public behavior of
+    # the program. When changing it, check callers, documentation, config compatibility,
+    # session-log compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def handle_key(self, ch: int) -> None:
         if ch == curses.KEY_MOUSE:
             self.handle_mouse()
@@ -3021,6 +3928,12 @@ class GeminiCursesApp:
         elif ch == 9: self.insert_text("    ")
         elif 32 <= ch <= 126: self.insert_text(chr(ch))
 
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def run
+    # Maintainer note for run: this routine is part of the long-term public behavior of the
+    # program. When changing it, check callers, documentation, config compatibility, session-log
+    # compatibility, and the parallel Bash/C implementation plans.
+    # ------------------------------------------------------------
     def run(self, stdscr: curses.window) -> None:
         self.stdscr = stdscr
         curses.noecho(); curses.cbreak(); stdscr.keypad(True)
@@ -3042,6 +3955,11 @@ class GeminiCursesApp:
 # ---------------------------------------------------------------------------
 
 
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: def main
+# Program bootstrap. Keep this thin: parse args, prepare config/dirs, run simple non-interactive
+# commands, then hand control to curses.
+# ------------------------------------------------------------
 def main() -> int:
     args = parse_args()
     if args.version:
