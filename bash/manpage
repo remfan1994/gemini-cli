@@ -1,7 +1,7 @@
 GEMINI-CLI(1)              User Commands              GEMINI-CLI(1)
 
 NAME
-    gemini-cli - Bash terminal interface for the Gemini API
+    gemini-cli - Bash/python3 terminal interface for the Gemini API
 
 SYNOPSIS
     gemini-cli
@@ -417,7 +417,7 @@ LIMITATIONS
       overall model quality
 
 VERSION
-    gemini-cli version 2.6
+    gemini-cli version 2.7
 
 AUTHOR
     Part of the gemini-terminal-tools project.
