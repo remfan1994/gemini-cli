@@ -1,0 +1,31 @@
+# Changelog
+
+## 0.1.0
+
+### Added
+- Initial bash-only Gemini terminal client
+- Interactive Ctrl+D chat loop
+- Config file support through ~/.config/gemini-cli/config
+- API key support from environment or config
+- Model cache support
+- --update-models command
+- --models command
+- --select-model command
+- --test-model command
+- --attach FILE support
+- Rolling conversation context
+- Human-readable session logs
+- Context snapshots in session logs
+- Project Lead startup notice
+- Startup message-window explanation line
+- Optional jq support for stronger JSON parsing
+- Best-effort awk/sed fallback parsing when jq is unavailable
+- Text-like attachment support
+- Binary/media inlineData attempt through base64
+- Credits command
+- Config set/unset commands
+
+### Notes
+- This edition avoids Python by design.
+- This edition is not intended to be a curl example; it is an end-user terminal chat client with lighter dependencies.
+- JSON handling is inherently less robust than bash/python3 or ncurses/python unless jq is installed.
