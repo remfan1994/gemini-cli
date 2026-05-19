@@ -3,18 +3,20 @@
 # ==========================================================
 # gemini-cli
 # ----------------------------------------------------------
-# Bash-based terminal Gemini AI interface.
+# Bash/python3 terminal Gemini AI interface.
 #
 # VERSION
-#   2.6
+#   2.7
 #
 # DESIGN ROLE
-#   This Bash edition is the lightweight, line-oriented version of
-#   gemini-terminal-tools. It stays scriptable and readable while keeping
+#   This Bash/python3 edition is the practical line-oriented shell
+#   implementation of gemini-terminal-tools. It uses Python 3 helper snippets
+#   for JSON, URL, attachment, and log parsing tasks that are fragile in pure
+#   shell, while Bash remains the user-facing orchestration layer. It stays scriptable and readable while keeping
 #   capability parity with the ncurses edition where the feature makes sense
 #   in a command-line interface.
 #
-# NEW IN 2.6
+# CURRENT TRACK
 #   - Cached Gemini model list support
 #   - --update-models
 #   - --models uses cache when available
@@ -48,7 +50,7 @@
 set -o pipefail
 
 PROGRAM="gemini-cli"
-VERSION="2.6"
+VERSION="2.7"
 
 CONFIG_DIR="$HOME/.config/gemini-cli"
 CONFIG_FILE="$CONFIG_DIR/config"
