@@ -1,4 +1,33 @@
 # Changelog
+## 0.8.0
+
+### Added
+- Full global function-key screen-jump behavior across confirmation dialogs and text-entry dialogs
+- F8 editor selection menu
+- Detection of common editors from PATH using executable lookup
+- Custom editor command/path entry from the editor menu
+- Browse-for-editor workflow for selecting an editor executable
+- Runtime editor selection from the editor menu
+- Option to save selected editor to config as `EDITOR`
+- Project focus text in the credits/about screen
+- Additional explanatory comments around editor workflow and global function-key navigation
+
+### Changed
+- F8 no longer immediately launches the configured editor
+- F8 now opens a user-friendly editor menu before launching an editor
+- Function-key navigation is now more consistent across feature screens
+- Text input modals and yes/no dialogs no longer trap the user away from the F-key workflow
+
+### Documentation
+- Updated man page to version 0.8.0
+- Added GLOBAL FUNCTION-KEY NAVIGATION section
+- Added EDITOR MENU section
+- Added PROJECT FOCUS section
+
+### Notes
+- Drag selection remains the terminal emulator's responsibility.
+- This update is a UI stabilization step before any future C ncurses implementation.
+
 ## 0.7.2
 
 ### Added
