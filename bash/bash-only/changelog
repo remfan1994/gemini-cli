@@ -1,3 +1,23 @@
+## 0.5.0
+
+### Added
+- `ttychatter-gemini-bash` executable identity
+- `ttychatter-gemini-bash.1` man page identity
+- Preferred config path: `~/.config/ttychatter/gemini/config`
+
+### Changed
+- Bash-only client now uses the provider-specific `ttychatter-gemini-bash` identity
+- Help text, comments, diagnostics, and man page examples updated for the new naming scheme
+- Repository path references updated for `ttychatter/gemini/bash/bash-only/`
+
+### Documentation
+- Updated comments to explain the namespace migration and config fallback
+- Updated man page NAME/SYNOPSIS/version text
+- Updated project references from `ttychatter` to `ttychatter`
+
+### Notes
+- This is a namespace migration release, not a feature release.
+- The Bash-only dependency posture is unchanged.
 # Changelog
 ## 0.4.1
 
