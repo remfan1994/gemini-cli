@@ -52,17 +52,17 @@ The project avoids:
 ## Current implementation tracks
 
 ```text
-gemini/bash/bash-only/ttychatter-gemini-bash
+bash/bash-only/ttychatter-gemini-bash
     Dependency-light Bash client with no Python requirement.
 
-gemini/bash/python3/ttychatter-gemini-python3
+bash/python3/ttychatter-gemini-python3
     Bash client with Python 3 helper snippets for stronger JSON, parsing,
     attachment, model-cache, and memory behavior.
 
-gemini/ncurses/python/ttychatter-gemini-ncurses-python
+ncurses/python/ttychatter-gemini-ncurses-python
     Full-screen Python ncurses reference implementation.
 
-gemini/ncurses/c/ttychatter-gemini-ncurses
+ncurses/c/ttychatter-gemini-ncurses
     Planned future native C ncurses implementation.
 ```
 
@@ -76,32 +76,37 @@ The Bash-only version is the dependency-light client for systems where Python 3 
 
 ## Repository layout
 
+The repository uses a flat implementation layout. The provider name `gemini`
+remains in the executable names because that is the user-facing namespace that
+prevents command collisions and leaves room for future provider families, but
+the repo directories stay simple.
+
 ```text
-gemini/
-  bash/
-    bash-only/
-      ttychatter-gemini-bash
-      ttychatter-gemini-bash.1
-      CHANGELOG.md
+bash/
+  bash-only/
+    ttychatter-gemini-bash
+    ttychatter-gemini-bash.1
+    CHANGELOG.md
 
-    python3/
-      ttychatter-gemini-python3
-      ttychatter-gemini-python3.1
-      CHANGELOG.md
+  python3/
+    ttychatter-gemini-python3
+    ttychatter-gemini-python3.1
+    CHANGELOG.md
 
-  ncurses/
-    python/
-      ttychatter-gemini-ncurses-python
-      ttychatter-gemini-ncurses-python.1
-      CHANGELOG.md
+ncurses/
+  python/
+    ttychatter-gemini-ncurses-python
+    ttychatter-gemini-ncurses-python.1
+    CHANGELOG.md
 
-    c/
-      ANNOUNCED.md
+  c/
+    ANNOUNCED.md
 
 docs/
   PYTHON_NCURSES_STABILIZATION.md
   BASH_RUNTIME_COMMAND_MODE.md
   RELEASE_CANDIDATE_AUDIT.md
+  NAMESPACE_MIGRATION.md
 
 README.md
 LICENSE.txt
@@ -241,26 +246,26 @@ The clients use this metadata to list and filter models that support text genera
 ### Bash/Python3
 
 ```sh
-gemini/bash/python3/ttychatter-gemini-python3 --update-models
-gemini/bash/python3/ttychatter-gemini-python3 --models
-gemini/bash/python3/ttychatter-gemini-python3 --select-model
-gemini/bash/python3/ttychatter-gemini-python3 --test-model gemini-2.5-flash
+bash/python3/ttychatter-gemini-python3 --update-models
+bash/python3/ttychatter-gemini-python3 --models
+bash/python3/ttychatter-gemini-python3 --select-model
+bash/python3/ttychatter-gemini-python3 --test-model gemini-2.5-flash
 ```
 
 ### Bash-only
 
 ```sh
-gemini/bash/bash-only/ttychatter-gemini-bash --update-models
-gemini/bash/bash-only/ttychatter-gemini-bash --models
-gemini/bash/bash-only/ttychatter-gemini-bash --select-model
-gemini/bash/bash-only/ttychatter-gemini-bash --test-model gemini-2.5-flash
+bash/bash-only/ttychatter-gemini-bash --update-models
+bash/bash-only/ttychatter-gemini-bash --models
+bash/bash-only/ttychatter-gemini-bash --select-model
+bash/bash-only/ttychatter-gemini-bash --test-model gemini-2.5-flash
 ```
 
 ### Python ncurses
 
 ```sh
-gemini/ncurses/python/ttychatter-gemini-ncurses-python --models
-gemini/ncurses/python/ttychatter-gemini-ncurses-python --test-model gemini-2.5-flash
+ncurses/python/ttychatter-gemini-ncurses-python --models
+ncurses/python/ttychatter-gemini-ncurses-python --test-model gemini-2.5-flash
 ```
 
 Inside the ncurses interface, press F2 for model tools.
@@ -320,7 +325,7 @@ This command mode is the line-oriented equivalent of the ncurses function-key me
 Path:
 
 ```text
-gemini/bash/bash-only/ttychatter-gemini-bash
+bash/bash-only/ttychatter-gemini-bash
 ```
 
 Current line:
@@ -370,7 +375,7 @@ Limitations:
 Path:
 
 ```text
-gemini/bash/python3/ttychatter-gemini-python3
+bash/python3/ttychatter-gemini-python3
 ```
 
 Current line:
@@ -409,7 +414,7 @@ This version has a stronger implementation than Bash-only while still preserving
 Path:
 
 ```text
-gemini/ncurses/python/ttychatter-gemini-ncurses-python
+ncurses/python/ttychatter-gemini-ncurses-python
 ```
 
 Current line:
@@ -565,19 +570,19 @@ Media support depends on:
 Python ncurses:
 
 ```sh
-gemini/ncurses/python/ttychatter-gemini-ncurses-python --doctor
+ncurses/python/ttychatter-gemini-ncurses-python --doctor
 ```
 
 Bash/Python3:
 
 ```sh
-gemini/bash/python3/ttychatter-gemini-python3 --doctor
+bash/python3/ttychatter-gemini-python3 --doctor
 ```
 
 Bash-only:
 
 ```sh
-gemini/bash/bash-only/ttychatter-gemini-bash --doctor
+bash/bash-only/ttychatter-gemini-bash --doctor
 ```
 
 The diagnostics are intended to distinguish local environment problems from project bugs.
@@ -589,24 +594,24 @@ The diagnostics are intended to distinguish local environment problems from proj
 Man page filenames follow the executable names:
 
 ```text
-gemini/bash/bash-only/ttychatter-gemini-bash.1
-gemini/bash/python3/ttychatter-gemini-python3.1
-gemini/ncurses/python/ttychatter-gemini-ncurses-python.1
+bash/bash-only/ttychatter-gemini-bash.1
+bash/python3/ttychatter-gemini-python3.1
+ncurses/python/ttychatter-gemini-ncurses-python.1
 ```
 
 Future C version:
 
 ```text
-gemini/ncurses/c/ttychatter-gemini-ncurses.1
+ncurses/c/ttychatter-gemini-ncurses.1
 ```
 
 Example install:
 
 ```sh
 mkdir -p ~/.local/share/man/man1
-cp gemini/bash/bash-only/ttychatter-gemini-bash.1 ~/.local/share/man/man1/
-cp gemini/bash/python3/ttychatter-gemini-python3.1 ~/.local/share/man/man1/
-cp gemini/ncurses/python/ttychatter-gemini-ncurses-python.1 ~/.local/share/man/man1/
+cp bash/bash-only/ttychatter-gemini-bash.1 ~/.local/share/man/man1/
+cp bash/python3/ttychatter-gemini-python3.1 ~/.local/share/man/man1/
+cp ncurses/python/ttychatter-gemini-ncurses-python.1 ~/.local/share/man/man1/
 ```
 
 Then:
@@ -626,7 +631,7 @@ The C ncurses version is announced but not started.
 Planned executable:
 
 ```text
-gemini/ncurses/c/ttychatter-gemini-ncurses
+ncurses/c/ttychatter-gemini-ncurses
 ```
 
 The C implementation should begin only after the Python ncurses version is stable enough to serve as the reference implementation.
@@ -634,7 +639,7 @@ The C implementation should begin only after the Python ncurses version is stabl
 See:
 
 ```text
-gemini/ncurses/c/ANNOUNCED.md
+ncurses/c/ANNOUNCED.md
 ```
 
 ---
