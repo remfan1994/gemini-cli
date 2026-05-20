@@ -1,4 +1,48 @@
 # Changelog
+## 3.0
+
+### Added
+- Runtime colon-command mode inside the interactive chat loop
+- `:help` runtime command menu
+- `:quit` / `:exit` runtime exit commands
+- `:credits` runtime command
+- `:doctor` runtime command
+- `:list` / `:sessions` runtime commands
+- `:rename NAME` to rename the current session/log file without quitting
+- `:models` runtime model listing
+- `:update-models` runtime model cache refresh
+- `:select-model` runtime model selector
+- `:test-model MODEL` runtime model test
+- `:model MODEL` runtime model activation for the current chat
+- `:model-save MODEL` runtime model activation plus config save
+- `:config` runtime config summary
+- `:set KEY VALUE` runtime config setter
+- `:unset KEY` runtime config remover
+- `:set-api-key` runtime API-key save helper
+- `:forget-api-key` runtime API-key removal helper
+- `:memory` runtime memory viewer
+- `:edit-memory` runtime memory editor
+- `:clear-memory` runtime memory clear command
+- `:attach FILE` runtime attachment queue command
+- `:attachments` runtime attachment listing
+- `:editor` runtime external-editor compose-and-send command
+- Escaped colon support with `\:` for messages that should begin with a literal colon
+
+### Changed
+- Interactive prompt now advertises `:help for commands`
+- Local runtime commands are not logged, not stored in memory, and not sent to Gemini
+- Bash Python3 edition now has a line-oriented equivalent to ncurses function-key menus
+- Empty piped stdin exits cleanly instead of spinning after EOF
+
+### Documentation
+- Updated built-in help with runtime command mode
+- Updated man page with runtime command mode
+- Added maintainer commentary explaining why colon commands exist
+
+### Notes
+- Runtime command mode is the Bash-family counterpart to ncurses F-key screens.
+- The feature is intentionally line-oriented and does not attempt to imitate full-screen ncurses UI.
+
 ## 2.9
 
 ### Added
