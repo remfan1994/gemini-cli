@@ -1,3 +1,51 @@
+## 0.9.5
+
+### Added
+- Flat-layout namespace migration documentation
+- Explicit explanation that provider names belong in executable names while source directories remain simple
+
+### Changed
+- Repository layout reverted from provider-subdirectory structure to flat implementation directories:
+  - `bash/bash-only/`
+  - `bash/python3/`
+  - `ncurses/python/`
+  - `ncurses/c/`
+- Install scripts now use the flat directory layout
+- Smoke tests now use the flat directory layout
+- Project checks now use the flat directory layout
+- README repository tree updated for flat layout
+- Installation documentation updated for flat layout
+- Maintainer documentation updated for flat layout
+- C announcement now points to `ncurses/python/ttychatter-gemini-ncurses-python` as the reference implementation
+
+### Notes
+- Runtime client behavior is unchanged in this release.
+- Executable names remain provider-specific: `ttychatter-gemini-*`.
+- Config paths remain provider-specific under `~/.config/ttychatter/gemini/`.
+- The provider-subdirectory repo layout was intentionally dropped to keep the GitHub tree simple and easier to upload/manage.
+
+## 0.9.4
+
+### Added
+- Hardened collision-aware installer behavior
+- `install.sh --list-targets`
+- `install.sh --allow-shadow`
+- PATH command-collision detection during install checks
+- Safer installation documentation for command-name collisions
+- Documentation warning against `chmod 777`
+- Installation examples using `--name-prefix`
+
+### Changed
+- Installer now treats existing command names in PATH as collisions by default
+- Installer refuses to shadow existing PATH commands unless `--allow-shadow` is supplied
+- Installer help text now emphasizes conservative, non-destructive behavior
+- Installation documentation now presents direct `chmod +x` usage before installer usage
+- Installation documentation now explains `--force` and `--allow-shadow` separately
+
+### Notes
+- Runtime client behavior is unchanged in this release.
+- This is a packaging and release-safety update.
+- The installer remains optional; direct execution from the repository is still supported.
 ## 0.9.3
 
 ### Added
