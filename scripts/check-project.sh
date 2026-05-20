@@ -52,26 +52,30 @@ say "ttychatter local smoke test"
 say "root: $ROOT"
 say ""
 
-check_file_exists "gemini/ncurses/python/ttychatter-gemini-ncurses-python"
-check_file_exists "gemini/bash/python3/ttychatter-gemini-python3"
-check_file_exists "gemini/bash/bash-only/ttychatter-gemini-bash"
+check_file_exists "ncurses/python/ttychatter-gemini-ncurses-python"
+check_file_exists "bash/python3/ttychatter-gemini-python3"
+check_file_exists "bash/bash-only/ttychatter-gemini-bash"
 check_file_exists "README.md"
 check_file_exists ".gitignore"
 
 if command -v python3 >/dev/null 2>&1; then
-  run_check "python ncurses syntax" python3 -m py_compile "$ROOT/gemini/ncurses/python/ttychatter-gemini-ncurses-python"
-  run_check "ttychatter-gemini-ncurses-python --version" "$ROOT/gemini/ncurses/python/ttychatter-gemini-ncurses-python" --version
-  run_check "ttychatter-gemini-ncurses-python --help" "$ROOT/gemini/ncurses/python/ttychatter-gemini-ncurses-python" --help
+  run_check "python ncurses syntax" python3 -m py_compile "$ROOT/ncurses/python/ttychatter-gemini-ncurses-python"
+  run_check "ttychatter-gemini-ncurses-python --version" "$ROOT/ncurses/python/ttychatter-gemini-ncurses-python" --version
+  run_check "ttychatter-gemini-ncurses-python --help" "$ROOT/ncurses/python/ttychatter-gemini-ncurses-python" --help
 else
   fail "python3 not found; cannot check ncurses/python syntax"
 fi
 
-run_check "bash/python3 syntax" bash -n "$ROOT/gemini/bash/python3/ttychatter-gemini-python3"
-run_check "bash/bash-only syntax" bash -n "$ROOT/gemini/bash/bash-only/ttychatter-gemini-bash"
-run_check "ttychatter-gemini-python3 --version" "$ROOT/gemini/bash/python3/ttychatter-gemini-python3" --version
-run_check "ttychatter-gemini-bash --version" "$ROOT/gemini/bash/bash-only/ttychatter-gemini-bash" --version
-run_check "ttychatter-gemini-python3 --help" "$ROOT/gemini/bash/python3/ttychatter-gemini-python3" --help
-run_check "ttychatter-gemini-bash --help" "$ROOT/gemini/bash/bash-only/ttychatter-gemini-bash" --help
+run_check "bash/python3 syntax" bash -n "$ROOT/bash/python3/ttychatter-gemini-python3"
+run_check "bash/bash-only syntax" bash -n "$ROOT/bash/bash-only/ttychatter-gemini-bash"
+run_check "ttychatter-gemini-python3 --version" "$ROOT/bash/python3/ttychatter-gemini-python3" --version
+run_check "ttychatter-gemini-bash --version" "$ROOT/bash/bash-only/ttychatter-gemini-bash" --version
+run_check "ttychatter-gemini-python3 --help" "$ROOT/bash/python3/ttychatter-gemini-python3" --help
+run_check "ttychatter-gemini-bash --help" "$ROOT/bash/bash-only/ttychatter-gemini-bash" --help
+
+run_check "namespace audit" "$ROOT/scripts/name-audit.sh"
+run_check "installer collision check" "$ROOT/install.sh" --check --all
+run_check "installer dry run" "$ROOT/install.sh" --dry-run --all
 
 say ""
 if [ "$FAIL" -eq 0 ]; then

@@ -26,17 +26,17 @@ check() {
   fi
 }
 
-check "bash/python3 syntax" bash -n "$ROOT/gemini/bash/python3/ttychatter-gemini-python3"
-check "bash/bash-only syntax" bash -n "$ROOT/gemini/bash/bash-only/ttychatter-gemini-bash"
-check "ncurses/python syntax" python3 -m py_compile "$ROOT/gemini/ncurses/python/ttychatter-gemini-ncurses-python"
+check "bash/python3 syntax" bash -n "$ROOT/bash/python3/ttychatter-gemini-python3"
+check "bash/bash-only syntax" bash -n "$ROOT/bash/bash-only/ttychatter-gemini-bash"
+check "ncurses/python syntax" python3 -m py_compile "$ROOT/ncurses/python/ttychatter-gemini-ncurses-python"
 
-check "ttychatter-gemini-python3 --version" "$ROOT/gemini/bash/python3/ttychatter-gemini-python3" --version
-check "ttychatter-gemini-bash --version" "$ROOT/gemini/bash/bash-only/ttychatter-gemini-bash" --version
-check "ttychatter-gemini-ncurses-python --version" "$ROOT/gemini/ncurses/python/ttychatter-gemini-ncurses-python" --version
+check "ttychatter-gemini-python3 --version" "$ROOT/bash/python3/ttychatter-gemini-python3" --version
+check "ttychatter-gemini-bash --version" "$ROOT/bash/bash-only/ttychatter-gemini-bash" --version
+check "ttychatter-gemini-ncurses-python --version" "$ROOT/ncurses/python/ttychatter-gemini-ncurses-python" --version
 
-check "ttychatter-gemini-python3 --help" "$ROOT/gemini/bash/python3/ttychatter-gemini-python3" --help >/dev/null
-check "ttychatter-gemini-bash --help" "$ROOT/gemini/bash/bash-only/ttychatter-gemini-bash" --help >/dev/null
-check "ttychatter-gemini-ncurses-python --help" "$ROOT/gemini/ncurses/python/ttychatter-gemini-ncurses-python" --help >/dev/null
+check "ttychatter-gemini-python3 --help" "$ROOT/bash/python3/ttychatter-gemini-python3" --help >/dev/null
+check "ttychatter-gemini-bash --help" "$ROOT/bash/bash-only/ttychatter-gemini-bash" --help >/dev/null
+check "ttychatter-gemini-ncurses-python --help" "$ROOT/ncurses/python/ttychatter-gemini-ncurses-python" --help >/dev/null
 
 if [ "$FAIL" -ne 0 ]; then
   say ""
