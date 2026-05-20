@@ -57,7 +57,7 @@
 set -o pipefail
 
 PROGRAM="gemini-terminal"
-VERSION="0.2.0-bash-only"
+VERSION="0.3.0-bash-only"
 CONFIG_DIR="$HOME/.config/gemini-cli"
 CONFIG_FILE="$CONFIG_DIR/config"
 MODEL_CACHE_FILE="$CONFIG_DIR/models-cache.json"

@@ -1,0 +1,83 @@
+GEMINI-TERMINAL(1)                User Commands                GEMINI-TERMINAL(1)
+
+NAME
+    gemini-terminal - Bash-only dependency-light Gemini terminal chat client
+
+SYNOPSIS
+    gemini-terminal [session_name]
+    gemini-terminal --resume <session_name>
+    gemini-terminal --list
+    gemini-terminal --models
+    gemini-terminal --update-models
+    gemini-terminal --select-model [--save]
+    gemini-terminal --test-model <model_id> [--save]
+    gemini-terminal --set-api-key
+    gemini-terminal --attach FILE [session_name]
+    gemini-terminal --credits
+    gemini-terminal --doctor
+    gemini-terminal --version
+    gemini-terminal --help
+
+DESCRIPTION
+    gemini-terminal is the Bash-only implementation of gemini-terminal-tools.
+    It is designed for systems where Python 3 is unavailable or undesirable,
+    while still preserving the project's mission: a robust end-user terminal
+    chat client rather than a curl example.
+
+    It uses Bash, curl, and common Unix text tools.  jq is optional when
+    available.  Without Python or jq, JSON handling is best-effort, so the
+    Python-assisted Bash and ncurses versions remain more reliable.
+
+USAGE
+    Start a chat:
+
+        gemini-terminal
+
+    Start or reopen a named chat:
+
+        gemini-terminal android-backup
+
+    List sessions:
+
+        gemini-terminal --list
+
+    Update model cache:
+
+        gemini-terminal --update-models
+
+    Select a model:
+
+        gemini-terminal --select-model
+
+    Test a model:
+
+        gemini-terminal --test-model gemini-2.5-flash
+
+INPUT
+    Type or paste a message, then press Ctrl+D to send.  Ctrl+C exits.
+
+CONFIGURATION
+    Shared config file:
+
+        ~/.config/gemini-cli/config
+
+    Supported keys include MODEL, CONTEXT_TURNS, GEMINI_API_KEY, SESSION_DIR,
+    ATTACHMENT_DIR, MODEL_TEST_PROMPT, STARTUP_NOTICE, and model filter keys.
+
+DEPENDENCIES
+    Required:
+        bash, curl, sed, awk, grep, tr, base64, mktemp, printf
+
+    Optional:
+        jq, file
+
+LIMITATIONS
+    - JSON handling is best-effort without jq.
+    - Media attachment support is best-effort and depends on model/API support.
+    - This edition intentionally avoids Python.
+
+VERSION
+    gemini-terminal version 0.3.0-bash-only
+
+AUTHOR
+    Part of the gemini-terminal-tools project.
