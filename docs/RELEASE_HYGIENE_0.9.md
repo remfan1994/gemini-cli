@@ -4,17 +4,17 @@ The project is in a stabilization phase before any native C ncurses implementati
 
 ## Current executable names
 
-    bash/bash-only/gemini-terminal
-    bash/python3/gemini-terminal-python3
-    ncurses/python/gemini-ncurses-python
-    ncurses/c/gemini-ncurses        planned
+    gemini/bash/bash-only/ttychatter-gemini-bash
+    gemini/bash/python3/ttychatter-gemini-python3
+    gemini/ncurses/python/ttychatter-gemini-ncurses-python
+    gemini/ncurses/c/ttychatter-gemini-ncurses        planned
 
 ## Current man page names
 
-    gemini-terminal.1
-    gemini-terminal-python3.1
-    gemini-ncurses-python.1
-    gemini-ncurses.1                planned
+    ttychatter-gemini-bash.1
+    ttychatter-gemini-python3.1
+    ttychatter-gemini-ncurses-python.1
+    ttychatter-gemini-ncurses.1                planned
 
 ## Items to keep synchronized
 
@@ -31,7 +31,7 @@ The project is in a stabilization phase before any native C ncurses implementati
 
 The config path remains:
 
-    ~/.config/gemini-cli/config
+    ~/.config/ttychatter/gemini/config
 
 This is intentional for backward compatibility with earlier releases.
 

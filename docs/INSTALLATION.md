@@ -3,9 +3,9 @@
 This project currently ships three terminal clients:
 
 ```text
-bash/bash-only/gemini-terminal
-bash/python3/gemini-terminal-python3
-ncurses/python/gemini-ncurses-python
+gemini/bash/bash-only/ttychatter-gemini-bash
+gemini/bash/python3/ttychatter-gemini-python3
+gemini/ncurses/python/ttychatter-gemini-ncurses-python
 ```
 
 The clients are intentionally installable without root.  The recommended local
@@ -24,7 +24,7 @@ That gives:
 
 ## Requirements
 
-### gemini-terminal
+### ttychatter-gemini-bash
 
 Dependency-light Bash client:
 
@@ -35,7 +35,7 @@ common Unix tools: sed, awk, grep, tr, base64, mktemp
 optional jq
 ```
 
-### gemini-terminal-python3
+### ttychatter-gemini-python3
 
 Bash client with Python 3 helpers:
 
@@ -45,7 +45,7 @@ curl
 python3
 ```
 
-### gemini-ncurses-python
+### ttychatter-gemini-ncurses-python
 
 Full-screen ncurses client:
 
@@ -83,7 +83,7 @@ This installs all current clients into:
 A custom prefix may be supplied:
 
 ```sh
-./install.sh --prefix /opt/gemini-terminal-tools
+./install.sh --prefix /opt/ttychatter
 ```
 
 A dry run is available:
@@ -118,9 +118,9 @@ export MANPATH="$HOME/.local/share/man:${MANPATH:-}"
 Then try:
 
 ```sh
-man gemini-terminal
-man gemini-terminal-python3
-man gemini-ncurses-python
+man ttychatter-gemini-bash
+man ttychatter-gemini-python3
+man ttychatter-gemini-ncurses-python
 ```
 
 ## API key setup
@@ -134,7 +134,7 @@ export GEMINI_API_KEY="your_key"
 Config-file method:
 
 ```text
-~/.config/gemini-cli/config
+~/.config/ttychatter/gemini/config
 ```
 
 Example:
@@ -143,15 +143,15 @@ Example:
 GEMINI_API_KEY=your_key
 ```
 
-The config path still uses the old `gemini-cli` name for backward
+The config path still uses the old `ttychatter-gemini-python3` name for backward
 compatibility with earlier releases.
 
 ## Verify install
 
 ```sh
-gemini-terminal --version
-gemini-terminal-python3 --version
-gemini-ncurses-python --version
+ttychatter-gemini-bash --version
+ttychatter-gemini-python3 --version
+ttychatter-gemini-ncurses-python --version
 ```
 
 A repository-local smoke test is available before or after install:
@@ -172,7 +172,7 @@ The uninstaller removes installed executables and man pages only.  It does not
 remove user data:
 
 ```text
-~/.config/gemini-cli/
+~/.config/ttychatter/gemini/
 ~/.gpt/
 ```
 

@@ -4,12 +4,12 @@ The Python ncurses implementation is the reference for the future C version.  Be
 
 ## Required checks
 
-- `gemini-ncurses-python --version`
-- `gemini-ncurses-python --help`
-- `gemini-ncurses-python --doctor`
-- `gemini-ncurses-python --models` with cache present
-- `gemini-ncurses-python --update-models` online
-- `gemini-ncurses-python --test-model MODEL`
+- `ttychatter-gemini-ncurses-python --version`
+- `ttychatter-gemini-ncurses-python --help`
+- `ttychatter-gemini-ncurses-python --doctor`
+- `ttychatter-gemini-ncurses-python --models` with cache present
+- `ttychatter-gemini-ncurses-python --update-models` online
+- `ttychatter-gemini-ncurses-python --test-model MODEL`
 
 ## UI checks
 
@@ -53,7 +53,7 @@ The Bash editions should not copy ncurses menus, but they should preserve practi
 
 Before starting the C version, verify that:
 
-- `gemini-terminal-python3` has runtime colon commands documented in help/man page.
-- `gemini-terminal` has runtime colon commands documented in help/man page.
+- `ttychatter-gemini-python3` has runtime colon commands documented in help/man page.
+- `ttychatter-gemini-bash` has runtime colon commands documented in help/man page.
 - Bash command mode can rename sessions, inspect config, list/test/select models, inspect memory, use editor workflows where supported, and show diagnostics.
 - Bash-only limitations are intentional, documented, and caused by dependency constraints rather than neglect.

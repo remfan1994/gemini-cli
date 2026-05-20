@@ -7,28 +7,28 @@ This document tracks the project areas that should be checked before treating th
 Executables:
 
 ```text
-gemini-terminal
-gemini-terminal-python3
-gemini-ncurses-python
-gemini-ncurses        # future C version
+ttychatter-gemini-bash
+ttychatter-gemini-python3
+ttychatter-gemini-ncurses-python
+ttychatter-gemini-ncurses        # future C version
 ```
 
 Man pages:
 
 ```text
-gemini-terminal.1
-gemini-terminal-python3.1
-gemini-ncurses-python.1
-gemini-ncurses.1      # future C version
+ttychatter-gemini-bash.1
+ttychatter-gemini-python3.1
+ttychatter-gemini-ncurses-python.1
+ttychatter-gemini-ncurses.1      # future C version
 ```
 
 Config path:
 
 ```text
-~/.config/gemini-cli/config
+~/.config/ttychatter/gemini/config
 ```
 
-The config path intentionally keeps the historical `gemini-cli` name for backward compatibility.
+The preferred config path is the ttychatter provider path: `~/.config/ttychatter/gemini/config`.
 
 ## Stabilization checklist
 

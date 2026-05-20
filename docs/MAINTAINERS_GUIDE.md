@@ -20,7 +20,7 @@ a real end-user client.
 
 ## Implementation tracks
 
-### bash/bash-only/gemini-terminal
+### gemini/bash/bash-only/ttychatter-gemini-bash
 
 Dependency-light Bash client.
 
@@ -33,7 +33,7 @@ as many end-user features as possible without Python
 This track is allowed to make compromises around JSON parsing and media support,
 but it should still remain an actual interactive chat client.
 
-### bash/python3/gemini-terminal-python3
+### gemini/bash/python3/ttychatter-gemini-python3
 
 Line-oriented Bash client with Python 3 helpers.
 
@@ -46,7 +46,7 @@ practical shell client with reliable JSON/model/cache/memory helpers
 Python helpers are used where shell code becomes fragile: JSON construction,
 JSON parsing, URL quoting, attachment handling, and context parsing.
 
-### ncurses/python/gemini-ncurses-python
+### gemini/ncurses/python/ttychatter-gemini-ncurses-python
 
 Full-screen Python ncurses client.
 
@@ -59,7 +59,7 @@ behavioral reference for future native C ncurses implementation
 This is the richest current interface.  It should stabilize before the C version
 begins.
 
-### ncurses/c/gemini-ncurses
+### gemini/ncurses/c/ttychatter-gemini-ncurses
 
 Planned native C implementation.
 
@@ -77,31 +77,30 @@ serious stabilization pass.
 Current executable names:
 
 ```text
-gemini-terminal
-gemini-terminal-python3
-gemini-ncurses-python
+ttychatter-gemini-bash
+ttychatter-gemini-python3
+ttychatter-gemini-ncurses-python
 ```
 
 Future executable name:
 
 ```text
-gemini-ncurses
+ttychatter-gemini-ncurses
 ```
 
 Man page names should match executable names:
 
 ```text
-gemini-terminal.1
-gemini-terminal-python3.1
-gemini-ncurses-python.1
-gemini-ncurses.1
+ttychatter-gemini-bash.1
+ttychatter-gemini-python3.1
+ttychatter-gemini-ncurses-python.1
+ttychatter-gemini-ncurses.1
 ```
 
-Avoid reintroducing the old `gemini-cli` executable name.  The old name remains
-only in the shared config path:
+Avoid reintroducing older executable names.  The only old name retained is the legacy config fallback path, used only when the new ttychatter config file does not exist:
 
 ```text
-~/.config/gemini-cli/config
+~/.config/ttychatter/gemini/config
 ```
 
 That path is retained for backward compatibility.

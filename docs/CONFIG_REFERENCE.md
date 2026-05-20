@@ -3,7 +3,7 @@
 All current implementations share this config file:
 
 ```text
-~/.config/gemini-cli/config
+~/.config/ttychatter/gemini/config
 ```
 
 The config format is intentionally simple:

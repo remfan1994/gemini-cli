@@ -1,4 +1,4 @@
-# gemini-terminal-tools behavior contract
+# ttychatter behavior contract
 
 This document records the project behavior that maintainers should preserve across implementations.
 
@@ -6,7 +6,7 @@ The project now has multiple clients with different dependency profiles. They do
 
 ## Project mission
 
-gemini-terminal-tools exists to provide robust, user-friendly Gemini chat clients for the terminal.
+ttychatter exists to provide robust, user-friendly Gemini chat clients for the terminal.
 
 The project is not a collection of curl examples. It is not primarily developer sample code. The intent is that users can conduct AI chat, manage sessions, attach files, select models, and preserve conversation history without relying on a browser interface.
 
@@ -15,23 +15,23 @@ The project is not a collection of curl examples. It is not primarily developer 
 Current executable family:
 
 ```text
-gemini-terminal              dependency-light Bash-only client
-gemini-terminal-python3      Bash client with Python 3 helper reliability
-gemini-ncurses-python        Python ncurses reference client
-gemini-ncurses               planned native C ncurses client
+ttychatter-gemini-bash              dependency-light Bash-only client
+ttychatter-gemini-python3      Bash client with Python 3 helper reliability
+ttychatter-gemini-ncurses-python        Python ncurses reference client
+ttychatter-gemini-ncurses               planned native C ncurses client
 ```
 
 The Python ncurses client is the current full-screen behavioral reference. The C ncurses client should not begin by adding new behavior. It should begin by copying stable behavior from the Python ncurses client.
 
 ## Shared config path
 
-All current clients share the historical config path:
+All current Gemini clients share the ttychatter provider config path:
 
 ```text
-~/.config/gemini-cli/config
+~/.config/ttychatter/gemini/config
 ```
 
-This path intentionally keeps the old `gemini-cli` project name for backward compatibility. Renaming the config path would break existing users and should not be done lightly.
+The current provider-specific config path is `~/.config/ttychatter/gemini/config`.
 
 ## Shared storage concepts
 
