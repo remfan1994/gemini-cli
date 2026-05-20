@@ -9,6 +9,27 @@
 ### Changed
 - Bash/Python3 client now uses the provider-specific `ttychatter-gemini-python3` identity
 - Help text, comments, diagnostics, and man page examples updated for the new naming scheme
+- Repository path references updated for `ttychatter/bash/python3/`
+
+### Documentation
+- Updated comments to explain the namespace migration and config fallback
+- Updated man page NAME/SYNOPSIS/version text
+- Updated project references from `ttychatter` to `ttychatter`
+
+### Notes
+- This is a namespace migration release, not a feature release.
+- The Python3 helper architecture is unchanged.
+
+## 3.2
+
+### Added
+- `ttychatter-gemini-python3` executable identity
+- `ttychatter-gemini-python3.1` man page identity
+- Preferred config path: `~/.config/ttychatter/gemini/config`
+
+### Changed
+- Bash/Python3 client now uses the provider-specific `ttychatter-gemini-python3` identity
+- Help text, comments, diagnostics, and man page examples updated for the new naming scheme
 - Repository path references updated for `ttychatter/gemini/bash/python3/`
 
 ### Documentation
