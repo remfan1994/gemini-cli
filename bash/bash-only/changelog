@@ -1,4 +1,32 @@
 # Changelog
+## 0.4.1
+
+### Added
+- Runtime colon-command mode inside the interactive chat loop
+- `:help` runtime command menu
+- Runtime model commands where supported
+- Runtime config commands where supported
+- Runtime API-key commands where supported
+- Runtime memory commands where supported
+- Runtime file/editor/credits/doctor commands where supported
+- Escape behavior for literal colon messages using `\:`
+- Command-mode documentation in the man page and README
+
+### Changed
+- The Bash-only edition now has line-oriented feature parity with ncurses menus where practical
+- Colon commands are handled locally and are not sent to Gemini, not logged as chat, and not stored in memory
+- Prompt/help text now advertises `:help` for runtime commands
+- Diagnostics output now uses the renamed executable identity
+
+### Documentation
+- Updated runtime command-mode documentation
+- Updated README parity notes for Bash-only versus Bash/Python3 and ncurses
+- Added separate `docs/BASH_RUNTIME_COMMAND_MODE.md`
+
+### Notes
+- Bash-only still avoids Python and remains dependency-light.
+- Some behavior remains best-effort without `jq` because JSON handling in shell is inherently limited.
+
 ## 0.4.0
 
 ### Added
