@@ -1,0 +1,113 @@
+GEMINI-TERMINAL-PYTHON3(1)        User Commands        GEMINI-TERMINAL-PYTHON3(1)
+
+NAME
+    gemini-terminal-python3 - Bash terminal Gemini client with Python 3 helpers
+
+SYNOPSIS
+    gemini-terminal-python3 [session_name]
+    gemini-terminal-python3 --resume <session_name>
+    gemini-terminal-python3 --list
+    gemini-terminal-python3 --rename-session OLD NEW
+    gemini-terminal-python3 --models [--all]
+    gemini-terminal-python3 --models --sort input-tokens
+    gemini-terminal-python3 --update-models
+    gemini-terminal-python3 --test-model <model_id> [--save]
+    gemini-terminal-python3 --select-model [--save]
+    gemini-terminal-python3 --config
+    gemini-terminal-python3 --set KEY VALUE
+    gemini-terminal-python3 --unset KEY
+    gemini-terminal-python3 --set-api-key
+    gemini-terminal-python3 --forget-api-key
+    gemini-terminal-python3 --show-memory <session>
+    gemini-terminal-python3 --edit-memory <session>
+    gemini-terminal-python3 --clear-memory <session>
+    gemini-terminal-python3 --editor-prompt [session]
+    gemini-terminal-python3 --attach FILE [session]
+    gemini-terminal-python3 --credits
+    gemini-terminal-python3 --doctor
+    gemini-terminal-python3 --version
+    gemini-terminal-python3 --help
+
+DESCRIPTION
+    gemini-terminal-python3 is the practical line-oriented Bash edition of
+    gemini-terminal-tools.  It uses Bash for orchestration and Python 3 helper
+    snippets for JSON, URL quoting, attachment handling, config-safe parsing,
+    and other tasks that are fragile in shell alone.
+
+    It is not the same as the Bash-only edition.  This version favors reliability
+    while remaining lighter than the ncurses interface.
+
+USAGE
+    First-time setup:
+
+        gemini-terminal-python3 --set-api-key
+        gemini-terminal-python3 --update-models
+        gemini-terminal-python3 --select-model
+
+    Start a timestamped chat:
+
+        gemini-terminal-python3
+
+    Start or reopen a named chat:
+
+        gemini-terminal-python3 android-backup
+
+    Resume a named chat:
+
+        gemini-terminal-python3 --resume android-backup
+
+    List sessions:
+
+        gemini-terminal-python3 --list
+
+    Show effective config:
+
+        gemini-terminal-python3 --config
+
+    Set config value:
+
+        gemini-terminal-python3 --set CONTEXT_TURNS 20
+
+INPUT
+    Type or paste a message, then press Ctrl+D to send.  Ctrl+C exits.
+
+MODEL WORKFLOW
+    Model discovery uses the Gemini models endpoint and filters metadata rather
+    than guessing future model names.
+
+        gemini-terminal-python3 --models
+        gemini-terminal-python3 --update-models
+        gemini-terminal-python3 --test-model gemini-2.5-flash
+        gemini-terminal-python3 --select-model
+
+CONFIGURATION
+    Shared config file:
+
+        ~/.config/gemini-cli/config
+
+    Important keys:
+
+        MODEL, CONTEXT_TURNS, GEMINI_API_KEY, SESSION_DIR, ATTACHMENT_DIR,
+        EDITOR, MODEL_TEST_PROMPT, MAX_ATTACHMENT_BYTES, STARTUP_NOTICE,
+        MODEL_FILTER_GENERATE_CONTENT, MODEL_FILTER_REQUIRE_TOKENS,
+        MODEL_FILTER_HIDE_PREVIEW, MODEL_MIN_INPUT_TOKENS,
+        MODEL_MIN_OUTPUT_TOKENS, MODEL_SORT_ORDER
+
+MEMORY
+    The client stores and rebuilds rolling conversation context using session
+    logs and memory snapshots.  CONTEXT_TURNS controls how many recent
+    user/assistant exchanges are sent back to Gemini.
+
+ATTACHMENTS
+    The client can extract fenced code blocks from Gemini output into attachment
+    files and can attach local files to prompts.  Media support depends on model
+    and API capability.
+
+DIAGNOSTICS
+    --doctor checks local readiness without printing API key values.
+
+VERSION
+    gemini-terminal-python3 version 2.9
+
+AUTHOR
+    Part of the gemini-terminal-tools project.
