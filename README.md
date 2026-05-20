@@ -109,6 +109,47 @@ LICENSE.txt
 
 ---
 
+## Installation quick start
+
+Install all current clients into `~/.local`:
+
+```sh
+./install.sh
+```
+
+Install only one track:
+
+```sh
+./install.sh --bash-only
+./install.sh --bash-python3
+./install.sh --ncurses-python
+```
+
+Verify the repository before installing:
+
+```sh
+scripts/smoke-test.sh
+```
+
+Uninstall installed executables and man pages:
+
+```sh
+./uninstall.sh
+```
+
+The installer and uninstaller do not write or delete API keys, configuration,
+session logs, or attachments.  User data remains under the user-controlled
+configuration and session directories.
+
+See:
+
+```text
+docs/INSTALLATION.md
+docs/MAINTAINERS_GUIDE.md
+```
+
+---
+
 ## Shared config file
 
 All current clients continue to use the historical shared config path:
@@ -606,6 +647,36 @@ This project intentionally uses verbose source comments.
 The comments are for future-proofing and maintenance, not merely education. Future maintainers, fork authors, bug fixers, and port authors should be able to understand why the code exists, what assumptions it makes, and where the fragile areas are.
 
 The code is expected to be readable by strangers.
+
+Additional maintainer documents are included under `docs/`:
+
+```text
+docs/BEHAVIOR_CONTRACT.md
+    Shared behavior contract for all implementations, especially the future C port.
+
+docs/CONFIG_REFERENCE.md
+    Shared config-key reference and compatibility notes.
+
+docs/SESSION_LOG_FORMAT.md
+    Session log and context snapshot format guidance.
+
+docs/ATTACHMENT_BEHAVIOR.md
+    Attachment extraction, local attachment, inline data, and safety guidance.
+
+docs/MAINTAINER_COMMENTARY_POLICY.md
+    Project policy for intentionally verbose source commentary.
+
+docs/RELEASE_CANDIDATE_AUDIT.md
+    Stabilization checklist before treating a release as C-reference-ready.
+```
+
+A local smoke-test helper is also included:
+
+```sh
+scripts/check-project.sh
+```
+
+It checks local syntax, version output, and help output without requiring a network connection or API key.
 
 ---
 
