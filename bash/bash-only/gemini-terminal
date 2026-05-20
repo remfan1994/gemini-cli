@@ -62,7 +62,7 @@
 set -o pipefail
 
 PROGRAM="gemini-terminal"
-VERSION="0.4.0-bash-only"
+VERSION="0.4.1-bash-only"
 CONFIG_DIR="$HOME/.config/gemini-cli"
 CONFIG_FILE="$CONFIG_DIR/config"
 MODEL_CACHE_FILE="$CONFIG_DIR/models-cache.json"
@@ -191,7 +191,7 @@ check_cmd() { if command -v "$1" >/dev/null 2>&1; then doctor_status OK "command
 # Changes should preserve old-system usability and update docs/comments if
 # behavior changes.
 # ----------------------------------------------------------
-check_writable_dir() { mkdir -p "$1" 2>/dev/null || { printf 'not creatable: %s' "$1"; return 1; }; f="$1/.gemini-cli-write-test-$$"; if printf ok > "$f" 2>/dev/null; then rm -f "$f"; printf 'writable: %s' "$1"; return 0; fi; printf 'not writable: %s' "$1"; return 1; }
+check_writable_dir() { mkdir -p "$1" 2>/dev/null || { printf 'not creatable: %s' "$1"; return 1; }; f="$1/.gemini-terminal-write-test-$$"; if printf ok > "$f" 2>/dev/null; then rm -f "$f"; printf 'writable: %s' "$1"; return 0; fi; printf 'not writable: %s' "$1"; return 1; }
 
 # ----------------------------------------------------------
 # MAINTAINER COMMENTARY: function doctor_command
@@ -199,7 +199,7 @@ check_writable_dir() { mkdir -p "$1" 2>/dev/null || { printf 'not creatable: %s'
 # or require network generation calls.
 # ----------------------------------------------------------
 doctor_command() {
-  printf '%s\n\n' "gemini-cli bash-only diagnostics"
+  printf '%s\n\n' "${PROGRAM} bash-only diagnostics"
   doctor_status OK program "$PROGRAM version $VERSION"
   doctor_status OK shell "${BASH_VERSION:-unknown bash}"
   for cmd in bash curl sed awk grep tr mktemp printf; do check_cmd "$cmd"; done
