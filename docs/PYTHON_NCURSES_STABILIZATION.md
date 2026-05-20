@@ -1,68 +1,59 @@
 # Python ncurses stabilization checklist
 
-This checklist tracks work that should be completed before the Python ncurses edition is treated as the stable behavioral reference for the future C ncurses implementation.
+The Python ncurses implementation is the reference for the future C version.  Before the C implementation begins, the Python client should be stable enough that the C version can copy behavior rather than invent it.
 
-## Environment and diagnostics
+## Required checks
 
-- [x] Provide `--doctor` command-line diagnostics.
-- [x] Provide diagnostics screen inside the TUI.
-- [x] Check config file visibility.
-- [x] Check session directory writability.
-- [x] Check attachment directory writability.
-- [x] Check model-cache directory writability.
-- [x] Check editor resolution.
-- [x] Check DNS resolution.
-- [ ] Add optional deeper online model-cache validation if users explicitly request it.
+- `gemini-ncurses-python --version`
+- `gemini-ncurses-python --help`
+- `gemini-ncurses-python --doctor`
+- `gemini-ncurses-python --models` with cache present
+- `gemini-ncurses-python --update-models` online
+- `gemini-ncurses-python --test-model MODEL`
 
-## UI stability
+## UI checks
 
-- [x] Global function-key navigation across feature screens.
-- [x] Clickable command strip.
-- [x] Low-resolution-safe command menu.
-- [x] Scrollable help/error/credits pages.
-- [ ] Field-test low-resolution terminals.
-- [ ] Field-test Chromebook terminal behavior.
-- [ ] Field-test mousewheel behavior in several terminal emulators.
+- F1 command menu opens and launches commands.
+- F2 model menu does not contact Google until user chooses update/load behavior.
+- F3 API-key manager does not save secrets by default.
+- F4 session browser opens sessions and renames current session.
+- F5 options form saves and cancels predictably.
+- F6 memory viewer/editor handles clear/rebuild/edit.
+- F7 files/attachments browser handles missing directories and size limits.
+- F8 editor menu detects common editors and allows manual editor path.
+- F9 credits/about displays and wraps properly.
+- Function keys remain global across feature screens where practical.
+- Mousewheel scrolls transcript/lists.
+- Drag selection remains terminal-emulator behavior, not application behavior.
 
-## Model workflow
+## Low-resolution checks
 
-- [x] Cached model list.
-- [x] Explicit model-list update.
-- [x] Metadata-based filters.
-- [x] Manual selected-model test.
-- [x] No automatic model probing/autoscan.
-- [ ] Add clearer model-cache age display in header or model menu if useful.
+- Header does not make the program unusable.
+- Footer/command strip does not hide critical information.
+- Long text wraps.
+- Dialogs become scrollable pages when needed.
+- Status messages do not overwrite modal content.
 
-## Sessions and memory
+## Error checks
 
-- [x] Session browser.
-- [x] Session rename.
-- [x] Context snapshots in logs.
-- [x] Memory view/edit/clear/rebuild.
-- [ ] Stress-test session rename edge cases.
-- [ ] Stress-test memory snapshot parsing with long logs.
+- Offline/DNS failure produces a readable error screen.
+- Missing API key is clear and recoverable.
+- Corrupt model cache does not crash the UI.
+- Bad config values fall back safely or produce actionable diagnostics.
+- Missing editor is reported clearly.
+- Oversized attachment is refused clearly.
 
-## Attachments
+## Source comments
 
-- [x] Extract fenced code blocks.
-- [x] Attach local text files.
-- [x] Attach binary/media files through inlineData when supported.
-- [x] Save returned inlineData parts when parseable.
-- [ ] Validate MIME fallback behavior.
-- [ ] Validate file size limits and error messages.
-- [ ] Validate generated attachment naming collisions.
+The source should remain intentionally verbose.  Comments are part of project survivability: future maintainers, forkers, and C-port authors should be able to understand not only what the code does, but why the behavior exists.
 
-## Documentation
+## Cross-implementation parity checks
 
-- [x] Keep source comments verbose.
-- [x] Keep man page synchronized.
-- [x] Keep changelog synchronized.
-- [x] Keep README project posture current.
-- [ ] Add screenshots or terminal captures if desired.
+The Bash editions should not copy ncurses menus, but they should preserve practical capabilities through runtime colon commands.
 
-## C implementation readiness
+Before starting the C version, verify that:
 
-- [x] Announce C ncurses version.
-- [x] Identify Python ncurses as behavioral reference.
-- [x] Add diagnostics workflow that the C version can mirror.
-- [ ] Freeze Python ncurses feature behavior before starting C implementation.
+- `gemini-terminal-python3` has runtime colon commands documented in help/man page.
+- `gemini-terminal` has runtime colon commands documented in help/man page.
+- Bash command mode can rename sessions, inspect config, list/test/select models, inspect memory, use editor workflows where supported, and show diagnostics.
+- Bash-only limitations are intentional, documented, and caused by dependency constraints rather than neglect.
