@@ -1,4 +1,34 @@
 # Changelog
+## 3.1
+
+### Added
+- Runtime colon-command mode inside the interactive chat loop
+- `:help` runtime command menu
+- Runtime model commands: `:models`, `:update-models`, `:select-model`, `:test-model`, `:model`, and `:model-save`
+- Runtime config commands: `:config`, `:set`, and `:unset`
+- Runtime API-key commands: `:set-api-key` and `:forget-api-key`
+- Runtime memory commands: `:memory`, `:edit-memory`, and `:clear-memory`
+- Runtime file/editor commands: `:attach`, `:attachments`, and `:editor`
+- Runtime session command: `:rename`
+- Runtime support commands: `:credits`, `:doctor`, and `:quit`
+- Escape behavior for literal colon messages using `\:`
+- Command-mode documentation in the man page and README
+
+### Changed
+- The Bash/Python3 edition now has line-oriented feature parity with ncurses menus where practical
+- Colon commands are handled locally and are not sent to Gemini, not logged as chat, and not stored in memory
+- Prompt/help text now advertises `:help` for runtime commands
+- Diagnostics output now uses the renamed executable identity
+
+### Documentation
+- Updated runtime command-mode documentation
+- Updated README parity notes for Bash/Python3 versus ncurses
+- Added separate `docs/BASH_RUNTIME_COMMAND_MODE.md`
+
+### Notes
+- This is a line-oriented parity feature, not a full-screen UI feature.
+- Bash/Python3 remains the practical shell client with Python 3 helper reliability.
+
 ## 3.0
 
 ### Added
