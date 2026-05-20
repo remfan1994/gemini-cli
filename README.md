@@ -1,4 +1,4 @@
-# gemini-terminal-tools
+# ttychatter
 
 User-friendly Gemini chat clients for the text-based terminal.
 
@@ -7,7 +7,7 @@ This project is built around the idea that a browser is not required for serious
 Repository:
 
 ```text
-https://github.com/remfan1994/gemini-terminal-tools
+https://github.com/remfan1994/ttychatter
 ```
 
 Update the URL above if your published repository path changes.
@@ -16,7 +16,7 @@ Update the URL above if your published repository path changes.
 
 ## Project focus
 
-gemini-terminal-tools is not a collection of curl examples and is not intended primarily as developer API sample code.
+ttychatter is not a collection of curl examples and is not intended primarily as developer API sample code.
 
 The project goal is:
 
@@ -52,17 +52,17 @@ The project avoids:
 ## Current implementation tracks
 
 ```text
-bash/bash-only/gemini-terminal
+gemini/bash/bash-only/ttychatter-gemini-bash
     Dependency-light Bash client with no Python requirement.
 
-bash/python3/gemini-terminal-python3
+gemini/bash/python3/ttychatter-gemini-python3
     Bash client with Python 3 helper snippets for stronger JSON, parsing,
     attachment, model-cache, and memory behavior.
 
-ncurses/python/gemini-ncurses-python
+gemini/ncurses/python/ttychatter-gemini-ncurses-python
     Full-screen Python ncurses reference implementation.
 
-ncurses/c/gemini-ncurses
+gemini/ncurses/c/ttychatter-gemini-ncurses
     Planned future native C ncurses implementation.
 ```
 
@@ -77,25 +77,26 @@ The Bash-only version is the dependency-light client for systems where Python 3 
 ## Repository layout
 
 ```text
-bash/
-  bash-only/
-    gemini-terminal
-    gemini-terminal.1
-    CHANGELOG.md
+gemini/
+  bash/
+    bash-only/
+      ttychatter-gemini-bash
+      ttychatter-gemini-bash.1
+      CHANGELOG.md
 
-  python3/
-    gemini-terminal-python3
-    gemini-terminal-python3.1
-    CHANGELOG.md
+    python3/
+      ttychatter-gemini-python3
+      ttychatter-gemini-python3.1
+      CHANGELOG.md
 
-ncurses/
-  python/
-    gemini-ncurses-python
-    gemini-ncurses-python.1
-    CHANGELOG.md
+  ncurses/
+    python/
+      ttychatter-gemini-ncurses-python
+      ttychatter-gemini-ncurses-python.1
+      CHANGELOG.md
 
-  c/
-    ANNOUNCED.md
+    c/
+      ANNOUNCED.md
 
 docs/
   PYTHON_NCURSES_STABILIZATION.md
@@ -152,13 +153,11 @@ docs/MAINTAINERS_GUIDE.md
 
 ## Shared config file
 
-All current clients continue to use the historical shared config path:
+All current Gemini clients use the shared ttychatter/Gemini config path:
 
 ```text
-~/.config/gemini-cli/config
+~/.config/ttychatter/gemini/config
 ```
-
-The old `gemini-cli` name remains in this config path for backward compatibility with earlier versions. The executable names have changed, but the config path remains stable so existing users do not lose settings.
 
 Example:
 
@@ -214,7 +213,7 @@ GEMINI_API_KEY=your_key
 inside:
 
 ```text
-~/.config/gemini-cli/config
+~/.config/ttychatter/gemini/config
 ```
 
 The ncurses version can accept a runtime-only API key through F3.
@@ -242,26 +241,26 @@ The clients use this metadata to list and filter models that support text genera
 ### Bash/Python3
 
 ```sh
-bash/python3/gemini-terminal-python3 --update-models
-bash/python3/gemini-terminal-python3 --models
-bash/python3/gemini-terminal-python3 --select-model
-bash/python3/gemini-terminal-python3 --test-model gemini-2.5-flash
+gemini/bash/python3/ttychatter-gemini-python3 --update-models
+gemini/bash/python3/ttychatter-gemini-python3 --models
+gemini/bash/python3/ttychatter-gemini-python3 --select-model
+gemini/bash/python3/ttychatter-gemini-python3 --test-model gemini-2.5-flash
 ```
 
 ### Bash-only
 
 ```sh
-bash/bash-only/gemini-terminal --update-models
-bash/bash-only/gemini-terminal --models
-bash/bash-only/gemini-terminal --select-model
-bash/bash-only/gemini-terminal --test-model gemini-2.5-flash
+gemini/bash/bash-only/ttychatter-gemini-bash --update-models
+gemini/bash/bash-only/ttychatter-gemini-bash --models
+gemini/bash/bash-only/ttychatter-gemini-bash --select-model
+gemini/bash/bash-only/ttychatter-gemini-bash --test-model gemini-2.5-flash
 ```
 
 ### Python ncurses
 
 ```sh
-ncurses/python/gemini-ncurses-python --models
-ncurses/python/gemini-ncurses-python --test-model gemini-2.5-flash
+gemini/ncurses/python/ttychatter-gemini-ncurses-python --models
+gemini/ncurses/python/ttychatter-gemini-ncurses-python --test-model gemini-2.5-flash
 ```
 
 Inside the ncurses interface, press F2 for model tools.
@@ -321,13 +320,13 @@ This command mode is the line-oriented equivalent of the ncurses function-key me
 Path:
 
 ```text
-bash/bash-only/gemini-terminal
+gemini/bash/bash-only/ttychatter-gemini-bash
 ```
 
 Current line:
 
 ```text
-gemini-terminal 0.4.1-bash-only
+ttychatter-gemini-bash 0.5.0-bash-only
 ```
 
 Purpose:
@@ -371,13 +370,13 @@ Limitations:
 Path:
 
 ```text
-bash/python3/gemini-terminal-python3
+gemini/bash/python3/ttychatter-gemini-python3
 ```
 
 Current line:
 
 ```text
-gemini-terminal-python3 3.1
+ttychatter-gemini-python3 3.2
 ```
 
 Purpose:
@@ -410,13 +409,13 @@ This version has a stronger implementation than Bash-only while still preserving
 Path:
 
 ```text
-ncurses/python/gemini-ncurses-python
+gemini/ncurses/python/ttychatter-gemini-ncurses-python
 ```
 
 Current line:
 
 ```text
-gemini-ncurses-python 0.9.0
+ttychatter-gemini-ncurses-python 0.9.3
 ```
 
 Purpose:
@@ -566,19 +565,19 @@ Media support depends on:
 Python ncurses:
 
 ```sh
-ncurses/python/gemini-ncurses-python --doctor
+gemini/ncurses/python/ttychatter-gemini-ncurses-python --doctor
 ```
 
 Bash/Python3:
 
 ```sh
-bash/python3/gemini-terminal-python3 --doctor
+gemini/bash/python3/ttychatter-gemini-python3 --doctor
 ```
 
 Bash-only:
 
 ```sh
-bash/bash-only/gemini-terminal --doctor
+gemini/bash/bash-only/ttychatter-gemini-bash --doctor
 ```
 
 The diagnostics are intended to distinguish local environment problems from project bugs.
@@ -590,32 +589,32 @@ The diagnostics are intended to distinguish local environment problems from proj
 Man page filenames follow the executable names:
 
 ```text
-bash/bash-only/gemini-terminal.1
-bash/python3/gemini-terminal-python3.1
-ncurses/python/gemini-ncurses-python.1
+gemini/bash/bash-only/ttychatter-gemini-bash.1
+gemini/bash/python3/ttychatter-gemini-python3.1
+gemini/ncurses/python/ttychatter-gemini-ncurses-python.1
 ```
 
 Future C version:
 
 ```text
-ncurses/c/gemini-ncurses.1
+gemini/ncurses/c/ttychatter-gemini-ncurses.1
 ```
 
 Example install:
 
 ```sh
 mkdir -p ~/.local/share/man/man1
-cp bash/bash-only/gemini-terminal.1 ~/.local/share/man/man1/
-cp bash/python3/gemini-terminal-python3.1 ~/.local/share/man/man1/
-cp ncurses/python/gemini-ncurses-python.1 ~/.local/share/man/man1/
+cp gemini/bash/bash-only/ttychatter-gemini-bash.1 ~/.local/share/man/man1/
+cp gemini/bash/python3/ttychatter-gemini-python3.1 ~/.local/share/man/man1/
+cp gemini/ncurses/python/ttychatter-gemini-ncurses-python.1 ~/.local/share/man/man1/
 ```
 
 Then:
 
 ```sh
-man gemini-terminal
-man gemini-terminal-python3
-man gemini-ncurses-python
+man ttychatter-gemini-bash
+man ttychatter-gemini-python3
+man ttychatter-gemini-ncurses-python
 ```
 
 ---
@@ -627,7 +626,7 @@ The C ncurses version is announced but not started.
 Planned executable:
 
 ```text
-ncurses/c/gemini-ncurses
+gemini/ncurses/c/ttychatter-gemini-ncurses
 ```
 
 The C implementation should begin only after the Python ncurses version is stable enough to serve as the reference implementation.
@@ -635,7 +634,7 @@ The C implementation should begin only after the Python ncurses version is stabl
 See:
 
 ```text
-ncurses/c/ANNOUNCED.md
+gemini/ncurses/c/ANNOUNCED.md
 ```
 
 ---
