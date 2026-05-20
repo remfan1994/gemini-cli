@@ -39,7 +39,7 @@
 # provide a friendly terminal chat client for AI productivity without forcing
 # a browser or a large runtime stack.
 #
-# The difference from gemini/bash/python3/ttychatter-gemini-python3 is dependency
+# The difference from bash/python3/ttychatter-gemini-python3 is dependency
 # posture.  This edition must avoid Python.  It can rely on curl and ordinary
 # shell-era tools because any machine that can realistically talk to Gemini over
 # HTTPS already needs a working curl/TLS stack, but it should not assume Python
