@@ -1,0 +1,35 @@
+ttychatter changelog
+====================
+
+0.1.0 - 2026-05-20
+------------------
+
+Initial native C/ncurses port based on the Python ncurses reference.
+
+Added:
+- XDG-style default directories for config, data, attachments, and model cache.
+- Simple KEY=VALUE config parser with HISTORY_LIMIT compatibility.
+- Gemini generateContent REST transport through libcurl.
+- JSON request/response handling through json-c.
+- Model list fetching, caching, filtering, sorting, printing, and testing.
+- Full-screen ncurses chat UI with F-key navigation.
+- Session logs in plain text.
+- Rolling context memory and context snapshots in logs.
+- File attachment support for text and binary files.
+- Generated fenced-code extraction into files.
+- External editor integration through VISUAL, EDITOR, or configured EDITOR.
+- Doctor report for directories, API key, terminal, editor, cache, and DNS.
+- Man page and example config.
+
+Changed from Python reference:
+- Default session directory moved from the old home-directory layout to
+  XDG data paths.
+- Program name for the C port is `ttychatter` rather than the Python-specific
+  `ttychatter-gemini-ncurses-python`.
+
+Known limitations:
+- The C UI is intentionally compact for the first native port. It keeps the
+  core workflow but does not yet implement every mouse behavior from the Python
+  reference.
+- Model filter editing is currently done through the config file rather than a
+  dedicated in-UI filter editor.
