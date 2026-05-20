@@ -1,0 +1,195 @@
+.TH TTYCHATTER 1 "2026-05-20" "ttychatter 0.1.0" "User Commands"
+.SH NAME
+ttychatter \- native C/ncurses Gemini terminal client
+.SH SYNOPSIS
+.B ttychatter
+.RI [ SESSION ]
+.br
+.B ttychatter
+.B --resume
+.I NAME
+.br
+.B ttychatter
+.B --list
+.br
+.B ttychatter
+.B --models
+.br
+.B ttychatter
+.B --update-models
+.br
+.B ttychatter
+.B --test-model
+.I MODEL
+.br
+.B ttychatter
+.B --doctor
+.br
+.B ttychatter
+.B --version
+.SH DESCRIPTION
+.B ttychatter
+is a full-screen terminal client for Google's Gemini API. It uses ncurses for
+the interface, libcurl for HTTPS, and json-c for JSON parsing and generation.
+.PP
+The client keeps plain text session logs, saves rolling context snapshots,
+maintains a local cache of model metadata, supports user-selected model tests,
+accepts file attachments, extracts generated fenced code blocks into files, and
+can open an external editor for composing longer prompts.
+.SH OPTIONS
+.TP
+.B --resume NAME
+Open an existing named session, or create it if no log exists yet.
+.TP
+.B --list
+List saved sessions and exit.
+.TP
+.B --models
+Print cached Gemini generateContent models. If no cache exists, ttychatter tries
+to fetch one from Google.
+.TP
+.B --update-models
+Fetch the Gemini model list from Google, save the local cache, print visible
+models, and exit.
+.TP
+.BI --test-model " MODEL"
+Send the configured model-test prompt to MODEL and print the response.
+.TP
+.B --doctor
+Print diagnostics for API-key presence, terminal size, writable directories,
+editor resolution, model cache, and Gemini DNS resolution.
+.TP
+.B --version
+Print version information and exit.
+.SH INTERACTIVE KEYS
+.TP
+.B F1
+Open help.
+.TP
+.B F2
+Open the model selector. Enter saves the selected model. The selector can also
+test the selected model and update the model cache.
+.TP
+.B F3
+Paste and save a Gemini API key.
+.TP
+.B F4
+Open the session browser.
+.TP
+.B F5
+Open options.
+.TP
+.B F6
+Show rolling context memory.
+.TP
+.B F7
+Attach a file for the next request.
+.TP
+.B F8
+Open the configured external editor for the input buffer.
+.TP
+.B F9
+Show credits.
+.TP
+.B F10
+Quit.
+.TP
+.B Ctrl+G
+Send the current message.
+.TP
+.B Ctrl+Q
+Quit.
+.TP
+.B PageUp, PageDown
+Scroll the transcript.
+.TP
+.B Enter
+Insert a newline into the input buffer.
+.TP
+.B Ctrl+U
+Clear the input buffer.
+.SH CONFIGURATION
+The configuration file is a simple KEY=VALUE file. The default path is:
+.PP
+.I $XDG_CONFIG_HOME/ttychatter/gemini/config
+.PP
+If XDG_CONFIG_HOME is unset, the path is:
+.PP
+.I ~/.config/ttychatter/gemini/config
+.PP
+Recognized keys include:
+.TP
+.B GEMINI_API_KEY
+Gemini API key. The environment variable GEMINI_API_KEY overrides the saved
+value.
+.TP
+.B MODEL
+Selected Gemini model id. A leading "models/" prefix is accepted and stripped.
+.TP
+.B CONTEXT_TURNS
+Number of previous user/assistant turns to keep in request context. The legacy
+key HISTORY_LIMIT is also accepted as an alias when CONTEXT_TURNS is not set.
+.TP
+.B SESSION_DIR
+Directory for session logs.
+.TP
+.B ATTACHMENT_DIR
+Directory for saved generated code and response files.
+.TP
+.B EDITOR
+Editor command used by F8. If unset, VISUAL, EDITOR, then vi are tried.
+.TP
+.B MODEL_CACHE_FILE
+Path to the cached model metadata JSON.
+.TP
+.B MODEL_FILTER_GENERATE_CONTENT
+When true, show only models that list generateContent support.
+.TP
+.B MODEL_FILTER_REQUIRE_TOKENS
+When true, show only models with nonzero input and output token limits.
+.TP
+.B MODEL_FILTER_HIDE_PREVIEW
+When true, hide models whose metadata looks preview, experimental, exp, or beta.
+.TP
+.B MODEL_MIN_INPUT_TOKENS
+Minimum input token limit for visible models.
+.TP
+.B MODEL_MIN_OUTPUT_TOKENS
+Minimum output token limit for visible models.
+.TP
+.B MODEL_SORT_ORDER
+Sort order for model output. Supported values are api, model, name, display,
+input-desc, and output-desc.
+.TP
+.B MAX_ATTACHMENT_BYTES
+Maximum attachment size for inline request parts. The default is 20971520.
+.SH FILES
+.TP
+.I ~/.config/ttychatter/gemini/config
+Default config file.
+.TP
+.I ~/.local/share/ttychatter/gemini/sessions
+Default session log directory.
+.TP
+.I ~/.local/share/ttychatter/gemini/attachments
+Default generated/attachment file directory.
+.TP
+.I ~/.cache/ttychatter/gemini/models.json
+Default model cache.
+.SH SECURITY
+The client never prints the API key in doctor output. When it writes the config
+file, it attempts to set mode 0600. Users who do not want to save secrets can set
+GEMINI_API_KEY in the environment instead.
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B 1
+Network, configuration, model, or runtime command failure.
+.TP
+.B 2
+Command-line parse error or fatal allocation failure.
+.SH SEE ALSO
+.BR curl (1),
+.BR ncurses (3)
