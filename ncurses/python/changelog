@@ -22,6 +22,29 @@
 - This is a namespace migration release, not a feature release.
 - The old config path remains readable to protect existing testers during the rename.
 
+## 0.9.3
+
+### Added
+- `ttychatter-gemini-ncurses-python` executable identity
+- `ttychatter-gemini-ncurses-python.1` man page identity
+- Preferred config path: `~/.config/ttychatter/gemini/config`
+- Preferred model-cache namespace under `~/.cache/ttychatter/gemini/`
+
+### Changed
+- Project identity migrated from `ttychatter` to `ttychatter`
+- Python ncurses command documentation migrated to the `ttychatter-gemini-*` naming scheme
+- Comments and maintainer notes updated to describe the provider-specific `ttychatter/gemini` layout
+- Future C ncurses identity clarified as `ttychatter-gemini-ncurses`
+
+### Documentation
+- Updated NAME/SYNOPSIS/version text in the man page
+- Updated references to the new repository structure
+- Documented the legacy config fallback as a compatibility bridge only
+
+### Notes
+- This is a namespace migration release, not a feature release.
+- The old config path remains readable to protect existing testers during the rename.
+
 ## 0.9.0
 
 ### Added
