@@ -1,0 +1,55 @@
+## 0.9.3
+
+### Added
+- `ttychatter` project namespace
+- Provider-specific `gemini/` repository layout
+- `ttychatter-gemini-bash` command identity
+- `ttychatter-gemini-python3` command identity
+- `ttychatter-gemini-ncurses-python` command identity
+- Planned `ttychatter-gemini-ncurses` C command identity
+- Preferred Gemini config path: `~/.config/ttychatter/gemini/config`
+- Preferred Gemini model-cache path: `~/.cache/ttychatter/gemini/models.json`
+- Collision-aware installer behavior
+- Installer `--force` overwrite mode
+
+### Changed
+- Repository identity migrated from `gemini-terminal-tools` to `ttychatter`
+- Gemini clients moved under `gemini/`
+- Bash-only client moved under `gemini/bash/bash-only/`
+- Bash/Python3 client moved under `gemini/bash/python3/`
+- Python ncurses client moved under `gemini/ncurses/python/`
+- Planned C ncurses announcement moved under `gemini/ncurses/c/`
+- Executable names updated across scripts, comments, help text, man pages, docs, README, installer, uninstaller, and smoke tests
+- Installer no longer overwrites existing commands or man pages by default
+- Config references now use the `ttychatter/gemini` namespace
+
+### Documentation
+- Updated README for the `ttychatter` project posture
+- Updated maintainer documentation for provider-specific layout
+- Updated installation and test paths
+- Updated command names and man page names
+- Removed stale pre-ttychatter naming references except explicit legacy-config compatibility notes
+
+### Notes
+- This is a namespace migration release.
+- The rename is intentionally done before the future C implementation begins.
+- The provider-specific layout leaves room for future non-Gemini providers without renaming the entire project again.
+
+## 0.9.1 repository integration pass
+
+### Added
+- Documentation for Bash runtime colon-command mode
+- Release candidate audit checklist
+- Updated README section describing the renamed executable family
+- Updated README section describing command-mode parity between Bash and ncurses
+
+### Changed
+- Integrated latest Bash runtime-command-mode files into the repo package
+- Integrated latest renamed Python ncurses reference files into the repo package
+- Refreshed repository structure documentation around `bash/bash-only`, `bash/python3`, `ncurses/python`, and future `ncurses/c`
+- Clarified that `~/.config/gemini-cli/config` remains the compatibility config path despite executable renames
+
+### Notes
+- No new ncurses feature work was introduced in this pass.
+- No new Bash runtime-command feature work was introduced in this pass.
+- This pass is intended to reduce drift before further stabilization and eventual C implementation.
