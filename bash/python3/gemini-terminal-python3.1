@@ -30,11 +30,11 @@ SYNOPSIS
 
 DESCRIPTION
     gemini-terminal-python3 is the practical line-oriented Bash edition of
-    gemini-terminal-tools.  It uses Bash for orchestration and Python 3 helper
+    gemini-terminal-tools. It uses Bash for orchestration and Python 3 helper
     snippets for JSON, URL quoting, attachment handling, config-safe parsing,
     and other tasks that are fragile in shell alone.
 
-    It is not the same as the Bash-only edition.  This version favors reliability
+    It is not the same as the Bash-only edition. This version favors reliability
     while remaining lighter than the ncurses interface.
 
 USAGE
@@ -69,7 +69,87 @@ USAGE
         gemini-terminal-python3 --set CONTEXT_TURNS 20
 
 INPUT
-    Type or paste a message, then press Ctrl+D to send.  Ctrl+C exits.
+    Type or paste a message, then press Ctrl+D to send. Ctrl+C exits.
+
+RUNTIME COMMAND MODE
+    During a running chat, submit a line beginning with ':' to run a local
+    command instead of sending a message to Gemini. Runtime commands are not
+    logged as chat, not stored in memory, and not sent to Gemini.
+
+    Common runtime commands:
+
+        :help
+            Show runtime command help.
+
+        :quit
+            Exit the running chat.
+
+        :credits
+            Show credits and Project Lead notice.
+
+        :doctor
+            Run diagnostics.
+
+        :list
+            List saved sessions.
+
+        :rename NAME
+            Rename the current session and log file.
+
+        :models
+            Show the model list.
+
+        :update-models
+            Refresh the model cache from Google.
+
+        :select-model
+            Open numbered model selector.
+
+        :test-model MODEL
+            Test one model.
+
+        :model MODEL
+            Use MODEL for the current running chat only.
+
+        :model-save MODEL
+            Use MODEL now and save it to config.
+
+        :config
+            Show current config summary.
+
+        :set KEY VALUE
+            Save config key/value.
+
+        :unset KEY
+            Remove config key.
+
+        :set-api-key
+            Prompt for and save API key.
+
+        :forget-api-key
+            Remove GEMINI_API_KEY from config.
+
+        :memory
+            Show current in-process memory/context.
+
+        :edit-memory
+            Edit current memory/context in external editor.
+
+        :clear-memory
+            Clear current memory/context.
+
+        :attach FILE
+            Attach FILE to the next Gemini message.
+
+        :attachments
+            List saved generated/code attachments.
+
+        :editor
+            Compose a prompt in external editor and send it.
+
+    To send a literal message beginning with ':', begin it with a backslash:
+
+        \:this goes to Gemini
 
 MODEL WORKFLOW
     Model discovery uses the Gemini models endpoint and filters metadata rather
@@ -95,19 +175,19 @@ CONFIGURATION
 
 MEMORY
     The client stores and rebuilds rolling conversation context using session
-    logs and memory snapshots.  CONTEXT_TURNS controls how many recent
+    logs and memory snapshots. CONTEXT_TURNS controls how many recent
     user/assistant exchanges are sent back to Gemini.
 
 ATTACHMENTS
     The client can extract fenced code blocks from Gemini output into attachment
-    files and can attach local files to prompts.  Media support depends on model
+    files and can attach local files to prompts. Media support depends on model
     and API capability.
 
 DIAGNOSTICS
     --doctor checks local readiness without printing API key values.
 
 VERSION
-    gemini-terminal-python3 version 2.9
+    gemini-terminal-python3 version 3.0
 
 AUTHOR
     Part of the gemini-terminal-tools project.

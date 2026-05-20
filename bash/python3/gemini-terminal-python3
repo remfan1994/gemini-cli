@@ -6,7 +6,7 @@
 # Bash + Python 3 helper terminal Gemini AI interface.
 #
 # VERSION
-#   2.9
+#   3.0
 #
 # DESIGN ROLE
 #   This Bash edition is the lightweight, line-oriented version of
@@ -45,6 +45,13 @@
 # INPUT MODEL
 #   Interactive chat keeps the Ctrl+D send workflow. Type/paste input, then
 #   press Ctrl+D to submit it.
+#
+# RUNTIME COMMAND MODE
+#   If an input begins with a colon, such as :help or :rename notes, the
+#   client treats it as a local command instead of sending it to Gemini.
+#   This gives the Bash interface an IRC/ex-style command mode so users can
+#   manage sessions, models, memory, attachments, config, and editor workflow
+#   without quitting the running chat.
 # ==========================================================
 
 
@@ -77,7 +84,7 @@
 set -o pipefail
 
 PROGRAM="gemini-terminal-python3"
-VERSION="2.9"
+VERSION="3.0"
 
 CONFIG_DIR="$HOME/.config/gemini-cli"
 CONFIG_FILE="$CONFIG_DIR/config"
@@ -124,6 +131,7 @@ RENAME_OLD=""
 RENAME_NEW=""
 MEMORY_SESSION=""
 EDITOR_PROMPT=0
+RUNTIME_SEND_OVERRIDE=""
 
 # ==========================================================
 # SMALL UTILITY FUNCTIONS
@@ -592,6 +600,25 @@ MODEL HELP
 
     GenerateContent API reference:
         https://ai.google.dev/api/generate-content
+
+RUNTIME COMMAND MODE
+    During a running chat, submit a line beginning with ':' to run a local
+    command instead of sending a message to Gemini.
+
+    Examples:
+        :help
+        :rename research-notes
+        :models
+        :select-model
+        :test-model gemini-2.5-flash
+        :config
+        :set CONTEXT_TURNS 20
+        :memory
+        :attach /path/to/file.txt
+        :editor
+        :credits
+
+    Type :help during a chat for the full runtime command list.
 
 INPUT
     Type/paste text, then press Ctrl+D to send.
@@ -1147,6 +1174,283 @@ compose_with_editor() {
   rm -f "$tmp"
 }
 
+
+# ==========================================================
+# RUNTIME COLON-COMMAND MODE
+# ----------------------------------------------------------
+# The ncurses edition has function-key menus. Bash does not have a reliable,
+# portable way to offer that kind of UI without becoming a different program,
+# so the Bash-family clients use a local command mode inside the normal chat
+# loop. If the first character of the submitted input is a colon, the input is
+# interpreted by the client and is NOT sent to Gemini.
+#
+# This is intentionally similar to IRC slash commands, vi/ex commands, and
+# other terminal-native command modes. We chose ':' rather than '/' because
+# paths and URLs commonly begin with or contain '/', while ':' at the beginning
+# of a submitted chat message is rare and easy to document.
+#
+# The command mode exists for end-user usability, not developer cleverness. It
+# lets someone rename a session, attach a file, inspect memory, open an editor,
+# list models, test a model, or view credits without exiting and relaunching.
+# Future maintainers should keep this command set line-oriented and readable.
+# If a new feature exists in ncurses as a screen, its Bash equivalent should be
+# considered here as a colon command when that makes sense.
+# ==========================================================
+
+runtime_command_help() {
+  cat <<EOF
+Runtime commands are local gemini-terminal-python3 commands.
+They are not logged as chat, not stored in memory, and not sent to Gemini.
+
+General:
+  :help                         Show this runtime command menu
+  :quit                         Exit the running chat
+  :credits                      Show project credits and Project Lead notice
+  :doctor                       Run diagnostics
+
+Sessions:
+  :list                         List saved sessions
+  :rename NAME                  Rename the current session/log file
+
+Models:
+  :models                       Show filtered cached/live model list
+  :update-models                Refresh model cache from Google
+  :select-model                 Open numbered model selector
+  :test-model MODEL             Test one model with MODEL_TEST_PROMPT
+  :model MODEL                  Use MODEL for this running chat only
+  :model-save MODEL             Use MODEL now and save it to config
+
+Config and API key:
+  :config                       Print current config summary
+  :set KEY VALUE                Save config KEY=VALUE
+  :unset KEY                    Remove KEY from config
+  :set-api-key                  Prompt and save GEMINI_API_KEY
+  :forget-api-key               Remove GEMINI_API_KEY from config
+
+Memory:
+  :memory                       Show current in-process memory/context
+  :edit-memory                  Edit current memory/context in external editor
+  :clear-memory                 Clear current memory/context
+
+Files and editor:
+  :attach FILE                  Attach FILE to the next Gemini message
+  :attachments                  List saved generated/code attachments
+  :editor                       Compose a prompt in external editor and send it
+
+Notes:
+  - Colon commands must be the first thing in the submitted input.
+  - Use Ctrl+D after typing a colon command, the same as sending a message.
+  - Use a backslash before a colon if you truly want to send a message that
+    begins with a colon; the client will remove the backslash and send it.
+EOF
+}
+
+rename_current_session() {
+  local new_name="$1"
+  local clean_name new_path old_path
+
+  if [ -z "$new_name" ]; then
+    printf '%s\n' "usage: :rename NEW_SESSION_NAME"
+    return 1
+  fi
+
+  clean_name="$(sanitize_session_name "$new_name")"
+  new_path="$(resolve_session_path "$clean_name")"
+  old_path="$SESSION"
+
+  if [ "$new_path" = "$old_path" ]; then
+    printf 'session already named: %s\n' "$clean_name"
+    return 0
+  fi
+
+  if [ -e "$new_path" ]; then
+    printf 'cannot rename: target session already exists: %s\n' "$clean_name"
+    return 1
+  fi
+
+  if [ -f "$old_path" ]; then
+    mv "$old_path" "$new_path" || return 1
+  fi
+
+  SESSION_NAME="$clean_name"
+  SESSION="$new_path"
+  printf 'current session renamed to: %s\n' "$SESSION_NAME"
+}
+
+show_current_memory_runtime() {
+  local item
+  if [ "${#CONTEXT_BUFFER[@]}" -eq 0 ]; then
+    printf '%s\n' "current memory is empty"
+    return 0
+  fi
+  printf '%s\n' "current memory/context buffer:"
+  printf '%s\n' "----------------------------------------"
+  for item in "${CONTEXT_BUFFER[@]}"; do
+    printf '%s\n' "$item"
+  done
+  printf '%s\n' "----------------------------------------"
+}
+
+edit_current_memory_runtime() {
+  local tmp editor line
+  tmp="$(mktemp)" || return 1
+
+  for line in "${CONTEXT_BUFFER[@]}"; do
+    printf '%s\n' "$line" >> "$tmp"
+  done
+
+  editor="$(editor_command)"
+  $editor "$tmp"
+
+  CONTEXT_BUFFER=()
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ -n "$line" ] && CONTEXT_BUFFER+=("$line")
+  done < "$tmp"
+  rm -f "$tmp"
+  trim_context_buffer
+  write_context_snapshot "$(timestamp)"
+  printf 'memory updated; entries: %s\n' "${#CONTEXT_BUFFER[@]}"
+}
+
+list_attachments_runtime() {
+  local file
+  if [ ! -d "$ATTACHMENT_DIR" ]; then
+    printf 'attachment directory does not exist: %s\n' "$ATTACHMENT_DIR"
+    return 1
+  fi
+  for file in "$ATTACHMENT_DIR"/*; do
+    [ -e "$file" ] || { printf 'no attachments found in %s\n' "$ATTACHMENT_DIR"; return 0; }
+    basename "$file"
+  done
+}
+
+apply_runtime_config_change() {
+  local key="$1"
+  local value="$2"
+
+  case "$key" in
+    MODEL)
+      MODEL="$(normalize_model_id "$value")"
+      ACTIVE_MODEL="$(effective_model)"
+      ;;
+    CONTEXT_TURNS)
+      CONTEXT_TURNS="$(positive_int_or_default "$value" "$CONTEXT_TURNS")"
+      trim_context_buffer
+      ;;
+    SESSION_DIR)
+      SESSION_DIR="$(expand_path "$value")"
+      mkdir -p "$SESSION_DIR"
+      ;;
+    ATTACHMENT_DIR)
+      ATTACHMENT_DIR="$(expand_path "$value")"
+      mkdir -p "$ATTACHMENT_DIR"
+      ;;
+    MODEL_TEST_PROMPT)
+      MODEL_TEST_PROMPT="$value"
+      ;;
+    STARTUP_NOTICE)
+      STARTUP_NOTICE="$value"
+      ;;
+  esac
+}
+
+handle_runtime_command() {
+  local raw="$1"
+  local command rest key value editor_buffer runtime_status
+
+  case "$raw" in
+    \\:*)
+      RUNTIME_SEND_OVERRIDE="${raw#\\}"
+      return 2
+      ;;
+    :*)
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+
+  raw="${raw#:}"
+  command="${raw%%[[:space:]]*}"
+  if [ "$command" = "$raw" ]; then rest=""; else rest="${raw#*[[:space:]]}"; fi
+
+  case "$command" in
+    ""|help|h|\?) runtime_command_help ;;
+    quit|exit) printf '%s\n' "exiting"; exit 0 ;;
+    credits) credits ;;
+    doctor) doctor_command ;;
+
+    list|sessions) list_sessions ;;
+    rename) rename_current_session "$rest" ;;
+
+    models) print_models ;;
+    update-models|update_models) update_models_cache ;;
+    select-model|select_model) select_model_command ;;
+    test-model|test_model)
+      [ -n "$rest" ] || { printf '%s\n' "usage: :test-model MODEL"; return 0; }
+      test_model_command "$rest"
+      ;;
+    model)
+      [ -n "$rest" ] || { printf 'active model: %s\n' "$(model_label)"; return 0; }
+      MODEL="$(normalize_model_id "$rest")"
+      ACTIVE_MODEL="$(effective_model)"
+      printf 'active model for this chat: %s\n' "$ACTIVE_MODEL"
+      ;;
+    model-save)
+      [ -n "$rest" ] || { printf '%s\n' "usage: :model-save MODEL"; return 0; }
+      MODEL="$(normalize_model_id "$rest")"
+      ACTIVE_MODEL="$(effective_model)"
+      set_config_value "MODEL" "$ACTIVE_MODEL"
+      printf 'active model saved: %s\n' "$ACTIVE_MODEL"
+      ;;
+
+    config) print_config_summary ;;
+    set)
+      key="${rest%%[[:space:]]*}"
+      if [ "$key" = "$rest" ]; then value=""; else value="${rest#*[[:space:]]}"; fi
+      [ -n "$key" ] || { printf '%s\n' "usage: :set KEY VALUE"; return 0; }
+      set_config_value "$key" "$value"
+      apply_runtime_config_change "$key" "$value"
+      printf 'set %s=%s\n' "$key" "$value"
+      ;;
+    unset)
+      [ -n "$rest" ] || { printf '%s\n' "usage: :unset KEY"; return 0; }
+      remove_config_key "$rest"
+      [ "$rest" = "MODEL" ] && { MODEL=""; ACTIVE_MODEL="$(effective_model)"; }
+      printf 'removed config key if present: %s\n' "$rest"
+      ;;
+    set-api-key|api-key) set_api_key_command ;;
+    forget-api-key) forget_api_key_command ;;
+
+    memory|show-memory) show_current_memory_runtime ;;
+    edit-memory) edit_current_memory_runtime ;;
+    clear-memory)
+      CONTEXT_BUFFER=()
+      write_context_snapshot "$(timestamp)"
+      printf '%s\n' "current memory cleared"
+      ;;
+
+    attach)
+      [ -n "$rest" ] || { printf '%s\n' "usage: :attach FILE"; return 0; }
+      ATTACH_FILES+=("$rest")
+      printf 'queued attachment for next message: %s\n' "$rest"
+      ;;
+    attachments) list_attachments_runtime ;;
+    editor)
+      editor_buffer="$(compose_with_editor)"
+      [ -z "$editor_buffer" ] && { printf '%s\n' "editor returned empty prompt"; return 0; }
+      send_one_message "$editor_buffer"
+      ;;
+
+    *)
+      printf 'unknown runtime command: :%s\n' "$command"
+      printf '%s\n' "type :help for available commands"
+      ;;
+  esac
+
+  return 0
+}
+
 # ==========================================================
 # ARGUMENT PARSING
 # ==========================================================
@@ -1246,7 +1550,7 @@ print_chat_header() {
   printf 'context turns: %s\n' "$CONTEXT_TURNS"
   [ -f "$SESSION" ] && [ "${#CONTEXT_BUFFER[@]}" -gt 0 ] && printf 'loaded context entries: %s\n' "${#CONTEXT_BUFFER[@]}"
   [ "${#ATTACH_FILES[@]}" -gt 0 ] && printf 'pending attachments: %s\n' "${#ATTACH_FILES[@]}"
-  printf '%s\n\n' "Ctrl+D to send message, Ctrl+C to exit"
+  printf '%s\n\n' "Ctrl+D to send message, :help for commands, Ctrl+C to exit"
   if [ -z "$MODEL" ]; then
     printf '%s\n' "No MODEL configured. Using fallback model."
     printf '  %s --select-model\n\n' "$PROGRAM"
@@ -1301,7 +1605,22 @@ while true; do
   TS="$(timestamp)"
   printf '[%s] %s> ' "$TS" "$USER_NAME"
   buffer="$(cat)"
-  [ -z "$buffer" ] && continue
-  if [ "$NOTICE_VISIBLE" -eq 1 ]; then clear_screen; NOTICE_VISIBLE=0; print_chat_header; printf '[%s] %s: %s\n' "$TS" "$USER_NAME" "$buffer"; fi
+  if [ -z "$buffer" ]; then
+    [ -t 0 ] || exit 0
+    continue
+  fi
+
+  RUNTIME_SEND_OVERRIDE=""
+  if handle_runtime_command "$buffer"; then
+    continue
+  else
+    runtime_status=$?
+    if [ "$runtime_status" -eq 2 ]; then
+      buffer="$RUNTIME_SEND_OVERRIDE"
+    fi
+  fi
+
+  if [ "$NOTICE_VISIBLE" -eq 1 ]; then clear_screen; NOTICE_VISIBLE=0; print_chat_header; printf '[%s] %s: %s
+' "$TS" "$USER_NAME" "$buffer"; fi
   send_one_message "$buffer"
 done
